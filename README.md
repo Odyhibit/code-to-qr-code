@@ -102,4 +102,4 @@ npm test
 
 ## License
 
-MIT
+[MIT](https://opensource.org/licenses/MIT)
