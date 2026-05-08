@@ -1,0 +1,14 @@
+{
+  "name": "code-to-qr-code",
+  "version": "1.0.0",
+  "description": "Transfer files via animated QR codes. No network, no Bluetooth, no USB — just a screen and a camera.",
+  "main": "server.js",
+  "scripts": {
+    "test": "node --test test/test.js",
+    "start": "node server.js"
+  },
+  "keywords": ["qr", "file-transfer", "air-gapped", "reed-solomon", "qrcode"],
+  "author": "SDCVO",
+  "license": "MIT",
+  "type": "commonjs"
+}

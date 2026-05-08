@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Code to QR Code — Air-Gapped File Transfer</title>
+  <meta name="description" content="Transfer files via animated QR codes. No network, no Bluetooth, no USB — just a screen and a camera.">
+  <style>
+    :root {
+      --bg: #1e1e2e;
+      --surface: #2a2a3e;
+      --border: #3a3a50;
+      --text: #cdd6f4;
+      --text-dim: #7f849c;
+      --accent: #89b4fa;
+      --accent-hover: #74c7ec;
+      --success: #a6e3a1;
+      --error: #f38ba8;
+      --warning: #f9e2af;
+      --pink: #f5c2e7;
+      --mauve: #cba6f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { color: var(--accent-hover); }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    header {
+      text-align: center;
+      padding: 80px 24px 60px;
+    }
+    header h1 {
+      font-size: 2.4em;
+      font-weight: 800;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, var(--accent), var(--mauve), var(--pink));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    header p.tagline {
+      font-size: 1.15em;
+      color: var(--text-dim);
+      max-width: 500px;
+      margin: 0 auto 32px;
+    }
+    .cta-group {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 28px;
+      border-radius: 8px;
+      font-size: 1em;
+      font-weight: 600;
+      text-decoration: none;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+    .btn-primary { background: var(--accent); color: #111; }
+    .btn-primary:hover { color: #111; background: var(--accent-hover); }
+    .btn-secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    .btn-secondary:hover { color: var(--accent-hover); border-color: var(--accent-hover); }
+
+    section { padding: 60px 0; }
+    section h2 {
+      font-size: 1.5em;
+      margin-bottom: 32px;
+      text-align: center;
+    }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+    }
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+    }
+    .feature-card .icon {
+      font-size: 1.8em;
+      margin-bottom: 12px;
+      display: block;
+    }
+    .feature-card h3 {
+      font-size: 1.05em;
+      margin-bottom: 8px;
+      color: var(--text);
+    }
+    .feature-card p {
+      font-size: 0.88em;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+
+    .steps {
+      display: flex;
+      gap: 24px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    .step {
+      flex: 1;
+      min-width: 200px;
+      max-width: 280px;
+      text-align: center;
+    }
+    .step-number {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #111;
+      font-weight: 700;
+      font-size: 1.1em;
+      margin-bottom: 12px;
+    }
+    .step h3 { font-size: 1em; margin-bottom: 6px; }
+    .step p { font-size: 0.85em; color: var(--text-dim); }
+    .step-arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4em;
+      color: var(--text-dim);
+      padding-top: 20px;
+    }
+
+    .qr-demo {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin: 24px 0;
+    }
+    .qr-demo canvas {
+      border-radius: 6px;
+      image-rendering: pixelated;
+    }
+
+    footer {
+      text-align: center;
+      padding: 40px 0;
+      border-top: 1px solid var(--border);
+      margin-top: 40px;
+    }
+    footer p { font-size: 0.85em; color: var(--text-dim); }
+    footer a { margin: 0 8px; }
+
+    @media (max-width: 600px) {
+      header { padding: 48px 16px 36px; }
+      header h1 { font-size: 1.7em; }
+      .step-arrow { display: none; }
+      section { padding: 36px 0; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="container">
+      <h1>Code to QR Code</h1>
+      <p class="tagline">Transfer files via animated QR codes. No network, no Bluetooth, no USB — just a screen and a camera.</p>
+      <div class="cta-group">
+        <a href="encoder/" class="btn btn-primary">Encode Files</a>
+        <a href="decoder/" class="btn btn-secondary">Decode Files</a>
+        <a href="https://github.com/SDCVO/code-to-qr-code" class="btn btn-secondary" target="_blank" rel="noopener"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <section>
+    <div class="container">
+      <h2>How It Works</h2>
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">1</div>
+          <h3>Encode</h3>
+          <p>Drop a file (or folder) into the encoder. It compresses, chunks, and displays as animated QR codes.</p>
+        </div>
+        <div class="step-arrow">→</div>
+        <div class="step">
+          <div class="step-number">2</div>
+          <h3>Transfer</h3>
+          <p>Point your phone camera at the screen, or export a GIF/video and send it any way you like.</p>
+        </div>
+        <div class="step-arrow">→</div>
+        <div class="step">
+          <div class="step-number">3</div>
+          <h3>Decode</h3>
+          <p>Open the decoder on the receiving device. Scan with camera or upload the GIF/video. File extracted.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <h2>Features</h2>
+      <div class="features">
+        <div class="feature-card">
+          <span class="icon">&#128274;</span>
+          <h3>Air-Gapped</h3>
+          <p>No network, no server, no cloud. Data moves only through light — QR codes on a screen read by a camera. Works from file:// with no internet at all.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">&#127912;</span>
+          <h3>Compression + ZIP</h3>
+          <p>Gzip compression shrinks payloads. Drop multiple files or folders and they're zipped automatically before encoding.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">&#128640;</span>
+          <h3>Erasure Recovery</h3>
+          <p>Reed-Solomon parity chunks let the decoder recover from missed frames. Drop +5 parity, lose any 5 chunks, still get your file back.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">&#127909;</span>
+          <h3>GIF & Video Export</h3>
+          <p>Export animated QR as GIF or MP4/WebM. Send via AirDrop, Bluetooth, USB — the decoder reads frames from any video or GIF file.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">&#128247;</span>
+          <h3>Live Camera Scan</h3>
+          <p>Uses BarcodeDetector API (hardware-accelerated) with jsQR fallback. Real-time chunk tracking with FPS counter and progress grid.</p>
+        </div>
+        <div class="feature-card">
+          <span class="icon">&#9881;&#65039;</span>
+          <h3>Tunable Density</h3>
+          <p>Adjust chunk size (100–800 bytes) and QR error correction level (L/M/Q/H). Live preview shows chunk count, QR version, and cell size.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="container">
+      <p>
+        <a href="encoder/">Encoder</a>
+        <a href="decoder/">Decoder</a>
+        <a href="https://github.com/SDCVO/code-to-qr-code" target="_blank" rel="noopener">GitHub</a>
+      </p>
+      <p style="margin-top:8px;">No data ever leaves your devices. &mdash; SDCVO</p>
+    </div>
+  </footer>
+
+</body>
+</html>

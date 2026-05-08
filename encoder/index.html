@@ -1,0 +1,1167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Code to QR — Encoder</title>
+  <script src="qrcode.js"></script>
+  <script src="pako.min.js"></script>
+  <script src="jszip.min.js"></script>
+  <script src="reedsolomon.js"></script>
+  <style>
+    :root {
+      --bg: #1e1e2e;
+      --surface: #2a2a3e;
+      --border: #3a3a50;
+      --text: #cdd6f4;
+      --text-dim: #7f849c;
+      --accent: #89b4fa;
+      --accent-hover: #74c7ec;
+      --success: #a6e3a1;
+      --error: #f38ba8;
+      --warning: #f9e2af;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      padding: 24px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 1.6em; margin-bottom: 4px; }
+    .subtitle { color: var(--text-dim); font-size: 0.9em; margin-bottom: 24px; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .card h2 { font-size: 1.1em; margin-bottom: 12px; }
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .upload-zone:hover { border-color: var(--accent); }
+    .upload-zone.dragover { border-color: var(--accent); background: rgba(137,180,250,0.05); }
+    .upload-zone input { display: none; }
+    .upload-zone p { color: var(--text-dim); margin-top: 8px; font-size: 0.85em; }
+    .qr-display {
+      display: flex;
+      justify-content: center;
+      margin: 16px 0;
+    }
+    .qr-container {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      display: inline-block;
+    }
+    #qr-canvas { display: block; }
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 0.15s ease;
+    }
+    .frame-info {
+      text-align: center;
+      font-size: 0.9em;
+      color: var(--text-dim);
+      margin: 4px 0;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin: 12px 0;
+    }
+    button {
+      background: var(--accent);
+      color: #111;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9em;
+      font-weight: 600;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.4; cursor: default; }
+    button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    button.success { background: var(--success); }
+    .speed-control {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85em;
+    }
+    .speed-control input[type="range"] { width: 100px; }
+    .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 10px;
+      font-size: 0.75em;
+      font-weight: 600;
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+    .badge-comp { border-color: var(--success); color: var(--success); }
+    .meta { font-size: 0.85em; color: var(--text-dim); margin-bottom: 12px; line-height: 1.6; }
+    .meta-row { display: flex; justify-content: space-between; }
+    .hidden { display: none; }
+    .tip {
+      background: rgba(137,180,250,0.08);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-size: 0.85em;
+      color: var(--text-dim);
+      margin-top: 12px;
+      line-height: 1.5;
+    }
+    .tip strong { color: var(--text); }
+    .export-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+    }
+    .export-section h3 { font-size: 0.95em; margin-bottom: 10px; }
+    .export-options {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .export-options label { font-size: 0.85em; color: var(--text-dim); }
+    .export-options input[type="number"] {
+      width: 60px;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 0.85em;
+    }
+    .export-status {
+      font-size: 0.85em;
+      color: var(--text-dim);
+      margin-top: 8px;
+    }
+    .compression-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+      margin: 12px 0;
+    }
+    .stat-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      text-align: center;
+    }
+    .stat-box .stat-val {
+      font-size: 1.3em;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .stat-box .stat-label {
+      font-size: 0.75em;
+      color: var(--text-dim);
+      margin-top: 2px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Code to QR — Encoder</h1>
+  <p class="subtitle">Convert any file into animated QR codes — now with compression and GIF export</p>
+
+  <div class="card">
+    <h2>1. Select Files</h2>
+    <input type="file" id="file-input-files" multiple style="display:none">
+    <input type="file" id="file-input-folder" webkitdirectory style="display:none">
+    <div class="upload-zone" id="drop-zone">
+      <div style="font-size:1.2em;margin-bottom:4px;">Drop files or folders here</div>
+      <div style="font-size:0.85em;color:var(--text-dim);">or</div>
+      <div class="actions" style="margin-top:10px;">
+        <button id="btn-select-files">Select Files</button>
+        <button id="btn-select-folder" class="secondary">Select Folder</button>
+      </div>
+    </div>
+    <div class="meta hidden" id="file-meta"></div>
+    <div class="hidden" id="file-list" style="margin-top:12px;max-height:200px;overflow-y:auto;font-size:0.85em;color:var(--text-dim);"></div>
+    <div class="compression-stats hidden" id="comp-stats">
+      <div class="stat-box">
+        <div class="stat-val" id="stat-raw">—</div>
+        <div class="stat-label">Raw size</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" id="stat-compressed">—</div>
+        <div class="stat-label">Compressed (gzip)</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" id="stat-ratio">—</div>
+        <div class="stat-label">Saved</div>
+      </div>
+    </div>
+    <div class="actions hidden" id="rs-section" style="margin-top:12px;gap:12px;align-items:center;">
+      <span style="font-size:0.9em;">Reed-Solomon parity:</span>
+      <button id="btn-rs-off" style="padding:4px 12px;font-size:0.8em;">Off</button>
+      <button id="btn-rs-2" style="padding:4px 12px;font-size:0.8em;">+2</button>
+      <button id="btn-rs-5" style="padding:4px 12px;font-size:0.8em;">+5</button>
+      <button id="btn-rs-10" style="padding:4px 12px;font-size:0.8em;">+10</button>
+      <span class="badge" id="rs-overhead">no recovery</span>
+    </div>
+    <div class="hidden" id="density-section" style="margin-top:12px;">
+      <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:0.9em;">Chunk size:</label>
+          <input type="range" id="chunk-size-slider" min="100" max="800" step="50" value="500" style="width:120px;">
+          <span id="chunk-size-val" style="font-size:0.85em;min-width:50px;">500</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:0.9em;">Error correction:</label>
+          <select id="ec-level" style="padding:4px 8px;font-size:0.85em;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;">
+            <option value="L">L (7%)</option>
+            <option value="M" selected>M (15%)</option>
+            <option value="Q">Q (25%)</option>
+            <option value="H">H (30%)</option>
+          </select>
+        </div>
+        <span class="badge" id="density-info">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card hidden" id="encode-card">
+    <h2>2. Animated QR Code</h2>
+    <div class="meta" id="qr-meta"></div>
+    <div class="qr-display">
+      <div class="qr-container">
+        <canvas id="qr-canvas"></canvas>
+      </div>
+    </div>
+    <div class="frame-info" id="frame-info">Frame 1 / 1</div>
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+
+    <div class="controls">
+      <button id="btn-play">Play</button>
+      <button id="btn-pause" disabled>Pause</button>
+      <button id="btn-prev">&larr; Prev</button>
+      <button id="btn-next">Next &rarr;</button>
+      <button id="btn-reset" class="secondary">Reset</button>
+      <div class="speed-control">
+        <label>FPS: <span id="fps-val">3</span></label>
+        <input type="range" id="fps-slider" min="1" max="10" value="3">
+      </div>
+      <span class="badge" id="loop-badge">Loop 1</span>
+    </div>
+
+    <div class="export-section">
+      <h3>Export</h3>
+      <p style="font-size:0.85em;color:var(--text-dim);margin-bottom:10px;">
+        Generate a file you can send directly — no phone camera needed.
+      </p>
+      <div class="export-options">
+        <button id="btn-gif">Export GIF</button>
+        <button id="btn-video">Export Video (MP4/WebM)</button>
+        <label>Loops: <input type="number" id="gif-loops" value="2" min="1" max="10"></label>
+        <label>Delay (ms): <input type="number" id="gif-delay" value="400" min="100" max="2000" step="50"></label>
+      </div>
+      <div class="export-status hidden" id="gif-status"></div>
+      <div class="export-status hidden" id="video-status"></div>
+    </div>
+
+    <div class="tip">
+      <strong>Two ways to transfer:</strong><br>
+      &bull; <strong>Record screen</strong> with phone camera while QR codes animate<br>
+      &bull; <strong>Export GIF</strong> and send via AirDrop/Bluetooth/USB to receiving computer<br>
+      Then open <strong>decoder/index.html</strong> to extract the file.
+    </div>
+  </div>
+
+  <script>
+    var dropZone = document.getElementById('drop-zone');
+    var fileInputFiles = document.getElementById('file-input-files');
+    var fileInputFolder = document.getElementById('file-input-folder');
+    var btnSelectFiles = document.getElementById('btn-select-files');
+    var btnSelectFolder = document.getElementById('btn-select-folder');
+    var fileMeta = document.getElementById('file-meta');
+    var fileListEl = document.getElementById('file-list');
+    var compStats = document.getElementById('comp-stats');
+    var statRaw = document.getElementById('stat-raw');
+    var statCompressed = document.getElementById('stat-compressed');
+    var statRatio = document.getElementById('stat-ratio');
+    var encodeCard = document.getElementById('encode-card');
+    var qrMeta = document.getElementById('qr-meta');
+    var canvas = document.getElementById('qr-canvas');
+    var frameInfo = document.getElementById('frame-info');
+    var progressFill = document.getElementById('progress-fill');
+    var btnPlay = document.getElementById('btn-play');
+    var btnPause = document.getElementById('btn-pause');
+    var btnPrev = document.getElementById('btn-prev');
+    var btnNext = document.getElementById('btn-next');
+    var btnReset = document.getElementById('btn-reset');
+    var fpsVal = document.getElementById('fps-val');
+    var fpsSlider = document.getElementById('fps-slider');
+    var loopBadge = document.getElementById('loop-badge');
+    var btnGif = document.getElementById('btn-gif');
+    var btnVideo = document.getElementById('btn-video');
+    var gifLoopsInput = document.getElementById('gif-loops');
+    var gifDelayInput = document.getElementById('gif-delay');
+    var gifStatus = document.getElementById('gif-status');
+    var videoStatus = document.getElementById('video-status');
+    var rsSection = document.getElementById('rs-section');
+    var rsOverhead = document.getElementById('rs-overhead');
+    var btnRsOff = document.getElementById('btn-rs-off');
+    var btnRs2 = document.getElementById('btn-rs-2');
+    var btnRs5 = document.getElementById('btn-rs-5');
+    var btnRs10 = document.getElementById('btn-rs-10');
+
+    var chunks = [];
+    var currentFrame = 0;
+    var playing = false;
+    var fps = 3;
+    var loopCount = 1;
+    var intervalId = null;
+    var effectiveChunkSize = 500;
+    var fixedSize = { w: 440, h: 440 };
+    var rsParity = 0;
+
+    var densitySection = document.getElementById('density-section');
+    var chunkSizeSlider = document.getElementById('chunk-size-slider');
+    var chunkSizeVal = document.getElementById('chunk-size-val');
+    var ecLevelSelect = document.getElementById('ec-level');
+    var densityInfo = document.getElementById('density-info');
+    var userChunkSize = 500;
+    var userEcLevel = 'M';
+
+    function setRsParity(n) {
+      rsParity = n;
+      var btns = [btnRsOff, btnRs2, btnRs5, btnRs10];
+      btns.forEach(function(b) { b.style.background = ''; b.style.color = ''; });
+      var active = n === 0 ? btnRsOff : n === 2 ? btnRs2 : n === 5 ? btnRs5 : btnRs10;
+      active.style.background = 'var(--success)';
+      active.style.color = '#111';
+      rsOverhead.textContent = n === 0 ? 'no recovery' : 'recover up to ' + n + ' missing chunks';
+    }
+
+    btnRsOff.addEventListener('click', function() { setRsParity(0); reEncode(); });
+    btnRs2.addEventListener('click', function() { setRsParity(2); reEncode(); });
+    btnRs5.addEventListener('click', function() { setRsParity(5); reEncode(); });
+    btnRs10.addEventListener('click', function() { setRsParity(10); reEncode(); });
+
+    chunkSizeSlider.addEventListener('input', function() {
+      userChunkSize = parseInt(chunkSizeSlider.value);
+      chunkSizeVal.textContent = userChunkSize;
+      debouncedUpdateDensityInfo();
+    });
+    chunkSizeSlider.addEventListener('change', function() { reEncode(); });
+    ecLevelSelect.addEventListener('change', function() {
+      userEcLevel = ecLevelSelect.value;
+      updateDensityInfo();
+      reEncode();
+    });
+
+    var maxChunkSizeCache = {};
+
+    function getMaxChunkSize(ec) {
+      if (maxChunkSizeCache[ec]) return maxChunkSizeCache[ec];
+      var sizes = [800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100];
+      for (var s = 0; s < sizes.length; s++) {
+        var payload = JSON.stringify({
+          v: 2, i: 0, n: 999, hash: '12345678', name: 'x'.repeat(40),
+          rs: 1, k: 999, sz: 99999, t: 'd', d: 'A'.repeat(sizes[s])
+        });
+        try {
+          var qr = qrcode(0, ec);
+          qr.addData(payload);
+          qr.make();
+          maxChunkSizeCache[ec] = sizes[s];
+          return sizes[s];
+        } catch (e) { continue; }
+      }
+      maxChunkSizeCache[ec] = 100;
+      return 100;
+    }
+
+    function updateDensityInfo() {
+      if (!lastRawBytes) { densityInfo.textContent = '—'; return; }
+      var info = getCompressedBase64();
+      var base64 = info.base64;
+      var k = Math.ceil(base64.length / userChunkSize);
+      var payload = JSON.stringify({
+        v: 2, i: 0, n: k, hash: '12345678', name: 'x'.repeat(40),
+        rs: 1, k: k, sz: 99999, t: 'd', d: 'A'.repeat(userChunkSize)
+      });
+      try {
+        var qr = qrcode(0, userEcLevel);
+        qr.addData(payload);
+        qr.make();
+        var modules = qr.getModuleCount();
+        var cellSize = Math.floor(400 / modules);
+        var ver = Math.round((modules - 17) / 4);
+        densityInfo.textContent = k + ' chunks \u00b7 v' + ver + ' QR \u00b7 ' + cellSize + 'px cells';
+        densityInfo.className = 'badge ' + (cellSize >= 5 ? 'badge-success' : cellSize >= 3 ? 'badge-info' : 'badge-error');
+      } catch (e) {
+        var max = getMaxChunkSize(userEcLevel);
+        densityInfo.textContent = 'too large (max ' + max + ')';
+        densityInfo.className = 'badge badge-error';
+      }
+    }
+
+    var lastRawBytes = null;
+    var lastDisplayName = '';
+    var lastIsZip = false;
+    var cachedCompressed = null;
+    var cachedBase64 = '';
+    var densityDebounceId = null;
+
+    function getCompressedBase64() {
+      if (cachedCompressed && cachedCompressed.rawBytes === lastRawBytes) return cachedCompressed;
+      var compressed = pako.gzip(lastRawBytes);
+      var useCompressed = compressed.length < lastRawBytes.length;
+      var dataToEncode = useCompressed ? compressed : lastRawBytes;
+      var base64 = bytesToBase64(dataToEncode);
+      cachedCompressed = { rawBytes: lastRawBytes, base64: base64, compressed: compressed, useCompressed: useCompressed };
+      return cachedCompressed;
+    }
+
+    function debouncedUpdateDensityInfo() {
+      if (densityDebounceId) clearTimeout(densityDebounceId);
+      densityDebounceId = setTimeout(updateDensityInfo, 150);
+    }
+
+    function reEncode() {
+      if (!lastRawBytes) return;
+      encodeBytes(lastRawBytes, lastDisplayName, lastIsZip);
+    }
+
+    function simpleHash(bytes) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < bytes.length; i++) {
+        h ^= bytes[i];
+        h = Math.imul(h, 0x01000193);
+      }
+      return (h >>> 0).toString(16).padStart(8, '0');
+    }
+
+    function bytesToBase64(bytes) {
+      var chunkSize = 0x8000;
+      var str = '';
+      for (var i = 0; i < bytes.length; i += chunkSize) {
+        var slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+        str += String.fromCharCode.apply(null, slice);
+      }
+      return btoa(str);
+    }
+
+    function drawQrToCanvas(cvs, text, fixedWidth, fixedHeight) {
+      var qr = qrcode(0, userEcLevel);
+      qr.addData(text);
+      qr.make();
+
+      var moduleCount = qr.getModuleCount();
+      var fw = fixedWidth || 440;
+      var fh = fixedHeight || 440;
+      var margin = 20;
+      var availSize = Math.min(fw, fh) - margin * 2;
+      var cellSize = Math.max(2, Math.floor(availSize / moduleCount));
+      var qrSize = cellSize * moduleCount;
+      var offsetX = Math.floor((fw - qrSize) / 2);
+      var offsetY = Math.floor((fh - qrSize) / 2);
+
+      cvs.width = fw;
+      cvs.height = fh;
+
+      var ctx = cvs.getContext('2d');
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, cvs.width, cvs.height);
+
+      for (var row = 0; row < moduleCount; row++) {
+        for (var col = 0; col < moduleCount; col++) {
+          if (qr.isDark(row, col)) {
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(offsetX + col * cellSize, offsetY + row * cellSize, cellSize, cellSize);
+          }
+        }
+      }
+    }
+
+    function getQrModuleCount(text) {
+      try {
+        var qr = qrcode(0, userEcLevel);
+        qr.addData(text);
+        qr.make();
+        return qr.getModuleCount();
+      } catch (e) {
+        return 0;
+      }
+    }
+
+    function calcFixedSize(chunksArr) {
+      var maxMod = 0;
+      for (var i = 0; i < chunksArr.length; i++) {
+        var m = getQrModuleCount(JSON.stringify(chunksArr[i]));
+        if (m > maxMod) maxMod = m;
+      }
+      var cellSize = Math.max(4, Math.floor(400 / maxMod));
+      var size = cellSize * maxMod + 40;
+      return { w: size, h: size };
+    }
+
+    function renderQrToCanvas(cvs, text) {
+      try {
+        drawQrToCanvas(cvs, text, fixedSize.w, fixedSize.h);
+        return true;
+      } catch (err) {
+        var ctx = cvs.getContext('2d');
+        cvs.width = fixedSize.w;
+        cvs.height = fixedSize.h;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, cvs.width, cvs.height);
+        ctx.fillStyle = '#FF0000';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('Error: ' + err.message, 20, cvs.height / 2);
+        return false;
+      }
+    }
+
+    dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', function() { dropZone.classList.remove('dragover'); });
+    dropZone.addEventListener('drop', function(e) {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      var items = e.dataTransfer.items;
+      if (items && items.length) {
+        collectFilesFromDrop(items);
+      } else if (e.dataTransfer.files.length) {
+        processFiles(Array.prototype.slice.call(e.dataTransfer.files));
+      }
+    });
+    fileInputFiles.addEventListener('change', function() {
+      if (fileInputFiles.files.length) processFiles(Array.prototype.slice.call(fileInputFiles.files));
+    });
+    fileInputFolder.addEventListener('change', function() {
+      if (fileInputFolder.files.length) processFiles(Array.prototype.slice.call(fileInputFolder.files));
+    });
+    btnSelectFiles.addEventListener('click', function() { fileInputFiles.click(); });
+    btnSelectFolder.addEventListener('click', function() { fileInputFolder.click(); });
+
+    function collectFilesFromDrop(items) {
+      var entries = [];
+      for (var i = 0; i < items.length; i++) {
+        var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+        if (entry) entries.push(entry);
+      }
+      if (entries.length > 0) {
+        collectEntries(entries, [], function(files) {
+          processFiles(files);
+        });
+      } else {
+        var files = [];
+        for (var j = 0; j < items.length; j++) {
+          if (items[j].kind === 'file') files.push(items[j].getAsFile());
+        }
+        processFiles(files);
+      }
+    }
+
+    function readAllEntries(reader, callback) {
+      var allEntries = [];
+      (function readBatch() {
+        reader.readEntries(function(batch) {
+          if (batch.length === 0) { callback(allEntries); return; }
+          for (var i = 0; i < batch.length; i++) allEntries.push(batch[i]);
+          readBatch();
+        });
+      })();
+    }
+
+    function collectEntries(entries, accumulator, callback) {
+      var pending = entries.length;
+      if (pending === 0) { callback(accumulator); return; }
+
+      entries.forEach(function(entry) {
+        if (entry.isFile) {
+          entry.file(function(file) {
+            accumulator.push(file);
+            if (--pending === 0) callback(accumulator);
+          });
+        } else if (entry.isDirectory) {
+          var reader = entry.createReader();
+          readAllEntries(reader, function(subEntries) {
+            collectEntries(subEntries, accumulator, function() {
+              if (--pending === 0) callback(accumulator);
+            });
+          });
+        } else {
+          if (--pending === 0) callback(accumulator);
+        }
+      });
+    }
+
+    function processFiles(files) {
+      stopPlayback();
+      fileListEl.classList.add('hidden');
+      fileListEl.innerHTML = '';
+
+      files = files.filter(function(f) { return f && f.size > 0; });
+      if (files.length === 0) return;
+
+      if (files.length === 1 && !files[0].webkitRelativePath) {
+        encodeSingleFile(files[0]);
+      } else {
+        encodeMultipleFiles(files);
+      }
+    }
+
+    function encodeSingleFile(file) {
+      var reader = new FileReader();
+      reader.onload = function() {
+        try {
+          var rawBytes = new Uint8Array(reader.result);
+          encodeBytes(rawBytes, file.name, false);
+        } catch (err) {
+          alert('Error: ' + err.message);
+          console.error(err);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function encodeMultipleFiles(files) {
+      var zip = new JSZip();
+      var pending = files.length;
+
+      files.forEach(function(file) {
+        var filePath = file.webkitRelativePath || file.name;
+        var reader = new FileReader();
+        reader.onload = function() {
+          zip.file(filePath, reader.result);
+          if (--pending === 0) {
+            zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }).then(function(zipBytes) {
+              encodeBytes(zipBytes, files[0].name.replace(/\/.*$/, '') + '.zip', true);
+
+              fileListEl.classList.remove('hidden');
+              var html = '<strong>' + files.length + ' files zipped:</strong><br>';
+              var shown = 0;
+              files.forEach(function(f) {
+                if (shown < 30) {
+                  html += escapeHtml(f.webkitRelativePath || f.name) + ' (' + formatSize(f.size) + ')<br>';
+                  shown++;
+                }
+              });
+              if (files.length > 30) html += '... and ' + (files.length - 30) + ' more';
+              fileListEl.innerHTML = html;
+            });
+          }
+        };
+        reader.readAsArrayBuffer(file);
+      });
+    }
+
+    function encodeBytes(rawBytes, displayName, isZip) {
+      stopPlayback();
+      lastRawBytes = rawBytes;
+      lastDisplayName = displayName;
+      lastIsZip = isZip;
+      cachedCompressed = null;
+
+      var compressed = pako.gzip(rawBytes);
+      var useCompressed = compressed.length < rawBytes.length;
+      var dataToEncode = useCompressed ? compressed : rawBytes;
+      var compressionFlag = useCompressed ? 1 : 0;
+
+      var hash = simpleHash(rawBytes);
+      var base64 = bytesToBase64(dataToEncode);
+
+      effectiveChunkSize = userChunkSize;
+      var maxForEc = getMaxChunkSize(userEcLevel);
+      if (effectiveChunkSize > maxForEc) effectiveChunkSize = maxForEc;
+
+      var dataChunkCount = Math.ceil(base64.length / effectiveChunkSize);
+      var dataChunks = [];
+      for (var i = 0; i < dataChunkCount; i++) {
+        dataChunks.push(base64.slice(i * effectiveChunkSize, (i + 1) * effectiveChunkSize));
+      }
+
+      var parityChunkData = [];
+      if (rsParity > 0 && dataChunkCount > 0) {
+        var chunkBytes = dataChunks.map(function(d) {
+          var b = [];
+          for (var c = 0; c < d.length; c++) b.push(d.charCodeAt(c));
+          return new Uint8Array(b);
+        });
+        parityChunkData = ReedSolomon.encode(chunkBytes, rsParity);
+      }
+
+      var totalCount = dataChunkCount + parityChunkData.length;
+      chunks = [];
+
+      for (var di = 0; di < dataChunkCount; di++) {
+        chunks.push({
+          v: 2,
+          i: di,
+          n: totalCount,
+          hash: hash,
+          name: displayName,
+          gz: compressionFlag,
+          zip: isZip ? 1 : 0,
+          rs: rsParity > 0 ? 1 : 0,
+          k: dataChunkCount,
+          sz: rawBytes.length,
+          t: 'd',
+          d: dataChunks[di]
+        });
+      }
+
+      for (var pi = 0; pi < parityChunkData.length; pi++) {
+        var pRaw = '';
+        for (var b2 = 0; b2 < parityChunkData[pi].length; b2++) {
+          pRaw += String.fromCharCode(parityChunkData[pi][b2]);
+        }
+        chunks.push({
+          v: 2,
+          i: dataChunkCount + pi,
+          n: totalCount,
+          hash: hash,
+          name: displayName,
+          gz: compressionFlag,
+          zip: isZip ? 1 : 0,
+          rs: rsParity > 0 ? 1 : 0,
+          k: dataChunkCount,
+          sz: rawBytes.length,
+          t: 'p',
+          d: btoa(pRaw)
+        });
+      }
+
+      fixedSize = calcFixedSize(chunks);
+
+      fileMeta.classList.remove('hidden');
+      fileMeta.innerHTML = '<strong>' + escapeHtml(displayName) + '</strong> &middot; ' + formatSize(rawBytes.length) + ' &middot; ' + chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '') + ' &middot; Hash: <span style="font-size:1em;color:var(--accent)">' + hash + '</span>';
+
+      if (useCompressed) {
+        compStats.classList.remove('hidden');
+        statRaw.textContent = formatSize(rawBytes.length);
+        statCompressed.textContent = formatSize(compressed.length);
+        var saved = Math.round((1 - compressed.length / rawBytes.length) * 100);
+        statRatio.textContent = saved + '%';
+      } else {
+        compStats.classList.remove('hidden');
+        statRaw.textContent = formatSize(rawBytes.length);
+        statCompressed.textContent = formatSize(rawBytes.length) + ' (raw)';
+        statRatio.textContent = '0%';
+      }
+
+      rsSection.classList.remove('hidden');
+      densitySection.classList.remove('hidden');
+      updateDensityInfo();
+      setRsParity(rsParity);
+
+      encodeCard.classList.remove('hidden');
+      var metaParts = ['Base64 payload: ' + formatSize(base64.length) + ' &middot; chunk size: ' + effectiveChunkSize + ' bytes'];
+      if (useCompressed) metaParts.push('<span class="badge badge-comp">gzip compressed</span>');
+      if (isZip) metaParts.push('<span class="badge badge-comp">zipped</span>');
+      if (rsParity > 0) metaParts.push('<span class="badge badge-comp">RS +' + parityChunkData.length + ' parity (recover ' + rsParity + ')</span>');
+      qrMeta.innerHTML = metaParts.join(' &middot; ');
+
+      currentFrame = 0;
+      loopCount = 1;
+      loopBadge.textContent = 'Loop 1';
+      renderFrame(0);
+      startPlayback();
+    }
+
+    function renderFrame(index) {
+      var chunk = chunks[index];
+      var payload = JSON.stringify(chunk);
+      renderQrToCanvas(canvas, payload);
+
+      var pct = ((index + 1) / chunks.length * 100).toFixed(0);
+      progressFill.style.width = pct + '%';
+      frameInfo.textContent = 'Frame ' + (index + 1) + ' / ' + chunks.length;
+    }
+
+    function nextFrame() {
+      currentFrame++;
+      if (currentFrame >= chunks.length) {
+        currentFrame = 0;
+        loopCount++;
+        loopBadge.textContent = 'Loop ' + loopCount;
+      }
+      renderFrame(currentFrame);
+    }
+
+    function startPlayback() {
+      if (playing) return;
+      playing = true;
+      btnPlay.disabled = true;
+      btnPause.disabled = false;
+      intervalId = setInterval(nextFrame, 1000 / fps);
+    }
+
+    function stopPlayback() {
+      playing = false;
+      btnPlay.disabled = false;
+      btnPause.disabled = true;
+      if (intervalId) { clearInterval(intervalId); intervalId = null; }
+    }
+
+    btnPlay.addEventListener('click', startPlayback);
+    btnPause.addEventListener('click', stopPlayback);
+    btnNext.addEventListener('click', function() {
+      stopPlayback();
+      currentFrame = (currentFrame + 1) % chunks.length;
+      renderFrame(currentFrame);
+    });
+    btnPrev.addEventListener('click', function() {
+      stopPlayback();
+      currentFrame = (currentFrame - 1 + chunks.length) % chunks.length;
+      renderFrame(currentFrame);
+    });
+    btnReset.addEventListener('click', function() {
+      stopPlayback();
+      currentFrame = 0;
+      loopCount = 1;
+      loopBadge.textContent = 'Loop 1';
+      renderFrame(0);
+    });
+    fpsSlider.addEventListener('input', function(e) {
+      fps = parseInt(e.target.value);
+      fpsVal.textContent = fps;
+      if (playing) {
+        clearInterval(intervalId);
+        intervalId = setInterval(nextFrame, 1000 / fps);
+      }
+    });
+
+    var SimpleGifEncoder = (function() {
+      function writeByte(buf, v) { buf.push(v & 0xff); }
+      function writeShort(buf, v) { buf.push(v & 0xff); buf.push((v >> 8) & 0xff); }
+      function writeString(buf, s) { for (var i = 0; i < s.length; i++) buf.push(s.charCodeAt(i)); }
+
+      function lzwEncode(pixels, minCodeSize) {
+        var clearCode = 1 << minCodeSize;
+        var eoiCode = clearCode + 1;
+        var codeSize = minCodeSize + 1;
+        var nextCode = eoiCode + 1;
+        var output = [];
+        var bitBuf = 0;
+        var bitCount = 0;
+
+        function writeBits(code, size) {
+          bitBuf |= (code << bitCount);
+          bitCount += size;
+          while (bitCount >= 8) {
+            output.push(bitBuf & 0xff);
+            bitBuf >>>= 8;
+            bitCount -= 8;
+          }
+        }
+
+        var codeTable = {};
+        var codeCount = nextCode;
+
+        function resetTable() {
+          codeTable = {};
+          codeCount = nextCode;
+          codeSize = minCodeSize + 1;
+        }
+
+        writeBits(clearCode, codeSize);
+        resetTable();
+
+        if (pixels.length === 0) {
+          writeBits(eoiCode, codeSize);
+          if (bitCount > 0) output.push(bitBuf & 0xff);
+          return output;
+        }
+
+        var currentCode = pixels[0];
+
+        for (var i = 1; i < pixels.length; i++) {
+          var pixel = pixels[i];
+          var key = currentCode + '_' + pixel;
+          if (codeTable[key] !== undefined) {
+            currentCode = codeTable[key];
+          } else {
+            writeBits(currentCode, codeSize);
+            if (codeCount < 4096) {
+              codeTable[key] = codeCount++;
+              if (codeCount > (1 << codeSize) && codeSize < 12) {
+                codeSize++;
+              }
+            } else {
+              writeBits(clearCode, codeSize);
+              resetTable();
+            }
+            currentCode = pixel;
+          }
+        }
+
+        writeBits(currentCode, codeSize);
+        writeBits(eoiCode, codeSize);
+        if (bitCount > 0) output.push(bitBuf & 0xff);
+
+        return output;
+      }
+
+      function encode(frames, width, height, delayMs, loops) {
+        var buf = [];
+
+        writeString(buf, 'GIF89a');
+        writeShort(buf, width);
+        writeShort(buf, height);
+        writeByte(buf, 0x80);
+        writeByte(buf, 0);
+        writeByte(buf, 0);
+
+        writeByte(buf, 0xff);
+        writeByte(buf, 0xff);
+        writeByte(buf, 0xff);
+        writeByte(buf, 0x00);
+        writeByte(buf, 0x00);
+        writeByte(buf, 0x00);
+
+        writeByte(buf, 0x21);
+        writeByte(buf, 0xff);
+        writeByte(buf, 0x0b);
+        writeString(buf, 'NETSCAPE2.0');
+        writeByte(buf, 3);
+        writeByte(buf, 1);
+        writeShort(buf, loops);
+        writeByte(buf, 0);
+
+        var minCodeSize = 2;
+
+        for (var f = 0; f < frames.length; f++) {
+          var framePixels = frames[f];
+
+          writeByte(buf, 0x21);
+          writeByte(buf, 0xf9);
+          writeByte(buf, 4);
+          writeByte(buf, 0x00);
+          writeShort(buf, Math.round(delayMs / 10));
+          writeByte(buf, 0);
+          writeByte(buf, 0);
+
+          writeByte(buf, 0x2c);
+          writeShort(buf, 0);
+          writeShort(buf, 0);
+          writeShort(buf, width);
+          writeShort(buf, height);
+          writeByte(buf, 0);
+
+          writeByte(buf, minCodeSize);
+
+          var lzwData = lzwEncode(framePixels, minCodeSize);
+          var offset = 0;
+          while (offset < lzwData.length) {
+            var blockSize = Math.min(255, lzwData.length - offset);
+            writeByte(buf, blockSize);
+            for (var b = 0; b < blockSize; b++) {
+              writeByte(buf, lzwData[offset++]);
+            }
+          }
+          writeByte(buf, 0);
+        }
+
+        writeByte(buf, 0x3b);
+
+        return new Uint8Array(buf);
+      }
+
+      return { encode: encode };
+    })();
+
+    btnGif.addEventListener('click', function() {
+      if (chunks.length === 0) return;
+
+      btnGif.disabled = true;
+      gifStatus.classList.remove('hidden');
+      gifStatus.textContent = 'Generating frames...';
+
+      var loops = parseInt(gifLoopsInput.value) || 2;
+      var delay = parseInt(gifDelayInput.value) || 400;
+      var totalFrames = chunks.length * loops;
+      var gw = fixedSize.w;
+      var gh = fixedSize.h;
+
+      var tempCanvas = document.createElement('canvas');
+      tempCanvas.width = gw;
+      tempCanvas.height = gh;
+      var ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
+
+      var frames = [];
+
+      for (var loop = 0; loop < loops; loop++) {
+        for (var i = 0; i < chunks.length; i++) {
+          var payload = JSON.stringify(chunks[i]);
+          drawQrToCanvas(tempCanvas, payload, gw, gh);
+          var imgData = ctx.getImageData(0, 0, gw, gh);
+          var pixels = new Uint8Array(gw * gh);
+          for (var p = 0; p < pixels.length; p++) {
+            pixels[p] = (imgData.data[p * 4] < 128) ? 1 : 0;
+          }
+          frames.push(pixels);
+        }
+        gifStatus.textContent = 'Captured ' + frames.length + '/' + totalFrames + ' frames...';
+      }
+
+      gifStatus.textContent = 'Encoding GIF (' + frames.length + ' frames)...';
+
+      setTimeout(function() {
+        try {
+          var gifBytes = SimpleGifEncoder.encode(frames, gw, gh, delay, loops);
+          var blob = new Blob([gifBytes], { type: 'image/gif' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          var baseName = chunks[0].name || 'file';
+          a.download = baseName + '.qr.gif';
+          a.click();
+          URL.revokeObjectURL(url);
+
+          gifStatus.textContent = 'Done! GIF saved (' + formatSize(blob.size) + ', ' + frames.length + ' frames)';
+        } catch (err) {
+          gifStatus.textContent = 'Error: ' + err.message;
+          console.error(err);
+        }
+        btnGif.disabled = false;
+      }, 50);
+    });
+
+    btnVideo.addEventListener('click', function() {
+      if (chunks.length === 0) return;
+
+      var mimeType = '';
+      var ext = '';
+      if (typeof MediaRecorder !== 'undefined') {
+        if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
+          mimeType = 'video/mp4;codecs=avc1'; ext = 'mp4';
+        } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+          mimeType = 'video/mp4'; ext = 'mp4';
+        } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+          mimeType = 'video/webm;codecs=vp9'; ext = 'webm';
+        } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+          mimeType = 'video/webm;codecs=vp8'; ext = 'webm';
+        } else if (MediaRecorder.isTypeSupported('video/webm')) {
+          mimeType = 'video/webm'; ext = 'webm';
+        }
+      }
+
+      if (!mimeType) {
+        alert('Your browser does not support video recording. Try Chrome or Edge.');
+        return;
+      }
+
+      btnVideo.disabled = true;
+      videoStatus.classList.remove('hidden');
+
+      var loops = parseInt(gifLoopsInput.value) || 2;
+      var delay = parseInt(gifDelayInput.value) || 400;
+      var gw = fixedSize.w;
+      var gh = fixedSize.h;
+      var totalFrames = chunks.length * loops;
+
+      var recCanvas = document.createElement('canvas');
+      recCanvas.width = gw;
+      recCanvas.height = gh;
+      var recCtx = recCanvas.getContext('2d');
+
+      var stream = recCanvas.captureStream(0);
+      var track = stream.getVideoTracks()[0];
+      var recorder = new MediaRecorder(stream, { mimeType: mimeType, videoBitsPerSecond: 2000000 });
+      var recordedChunks = [];
+
+      recorder.ondataavailable = function(e) {
+        if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+      };
+
+      recorder.onstop = function() {
+        var blob = new Blob(recordedChunks, { type: mimeType.split(';')[0] });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        var baseName = chunks[0].name || 'file';
+        a.download = baseName + '.qr.' + ext;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        videoStatus.textContent = 'Done! Video saved (' + ext.toUpperCase() + ', ' + formatSize(blob.size) + ')';
+        btnVideo.disabled = false;
+      };
+
+      videoStatus.textContent = 'Recording frames (0/' + totalFrames + ')... This plays in real-time.';
+      recorder.start();
+
+      var frameQueue = [];
+      for (var loop = 0; loop < loops; loop++) {
+        for (var i = 0; i < chunks.length; i++) {
+          frameQueue.push(chunks[i]);
+        }
+      }
+
+      var qi = 0;
+      function nextVideoFrame() {
+        if (qi >= frameQueue.length) {
+          recorder.stop();
+          return;
+        }
+
+        var payload = JSON.stringify(frameQueue[qi]);
+        drawQrToCanvas(recCanvas, payload, gw, gh);
+
+        if (track.requestFrame) {
+          track.requestFrame();
+        }
+
+        qi++;
+        videoStatus.textContent = 'Recording frames (' + qi + '/' + totalFrames + ')...';
+
+        setTimeout(nextVideoFrame, delay);
+      }
+
+      nextVideoFrame();
+    });
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+  </script>
+
+  <footer style="text-align:center;padding:24px;border-top:1px solid var(--border);margin-top:24px;">
+    <p style="font-size:0.85em;color:var(--text-dim);">
+      <a href="../" style="color:var(--accent);text-decoration:none;">Home</a> &middot;
+      <a href="../decoder/" style="color:var(--accent);text-decoration:none;">Decoder</a> &middot;
+      <a href="https://github.com/SDCVO/code-to-qr-code" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="vertical-align:-2px;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> GitHub</a>
+    </p>
+    <p style="font-size:0.85em;color:var(--text-dim);margin-top:6px;">No data ever leaves your devices. &mdash; SDCVO</p>
+  </footer>
+</body>
+</html>
