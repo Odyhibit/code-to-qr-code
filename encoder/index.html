@@ -8,6 +8,7 @@
   <script src="pako.min.js"></script>
   <script src="jszip.min.js"></script>
   <script src="reedsolomon.js"></script>
+  <script src="../shared/protocol-v3.js"></script>
   <style>
     :root {
       --bg: #1e1e2e;
@@ -382,14 +383,19 @@
 
     var maxChunkSizeCache = {};
 
+    function v3BodyBudget(frameBudget) {
+      return Math.max(1, frameBudget - 24);
+    }
+
     function getMaxChunkSize(ec) {
       if (maxChunkSizeCache[ec]) return maxChunkSizeCache[ec];
       var sizes = [800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100];
       for (var s = 0; s < sizes.length; s++) {
-        var payload = JSON.stringify({
-          v: 2, i: 0, n: 999, hash: '12345678', name: 'x'.repeat(40),
-          rs: 1, k: 999, sz: 99999, t: 'd', d: 'A'.repeat(sizes[s])
+        var frames = QrProtocolV3.buildFrames(new Uint8Array(sizes[s] * 2), {
+          name: 'x'.repeat(40), hash: '12345678', originalSize: 99999,
+          chunkBodySize: v3BodyBudget(sizes[s]), gz: true, zip: false, rsParity: 1
         });
+        var payload = frames[0].bytes;
         try {
           var qr = qrcode(0, ec);
           qr.addData(payload);
@@ -404,13 +410,12 @@
 
     function updateDensityInfo() {
       if (!lastRawBytes) { densityInfo.textContent = '—'; return; }
-      var info = getCompressedBase64();
-      var base64 = info.base64;
-      var k = Math.ceil(base64.length / userChunkSize);
-      var payload = JSON.stringify({
-        v: 2, i: 0, n: k, hash: '12345678', name: 'x'.repeat(40),
-        rs: 1, k: k, sz: 99999, t: 'd', d: 'A'.repeat(userChunkSize)
+      var info = getCompressedData();
+      var frames = QrProtocolV3.buildFrames(info.dataToEncode, {
+        name: lastDisplayName || 'file', hash: '12345678', originalSize: lastRawBytes.length,
+        chunkBodySize: v3BodyBudget(userChunkSize), gz: info.useCompressed, zip: lastIsZip, rsParity: rsParity
       });
+      var payload = frames[0].bytes;
       try {
         var qr = qrcode(0, userEcLevel);
         qr.addData(payload);
@@ -418,7 +423,7 @@
         var modules = qr.getModuleCount();
         var cellSize = Math.floor(400 / modules);
         var ver = Math.round((modules - 17) / 4);
-        densityInfo.textContent = k + ' chunks \u00b7 v' + ver + ' QR \u00b7 ' + cellSize + 'px cells';
+        densityInfo.textContent = frames.length + ' chunks \u00b7 v' + ver + ' QR \u00b7 ' + cellSize + 'px cells';
         densityInfo.className = 'badge ' + (cellSize >= 5 ? 'badge-success' : cellSize >= 3 ? 'badge-info' : 'badge-error');
       } catch (e) {
         var max = getMaxChunkSize(userEcLevel);
@@ -434,13 +439,12 @@
     var cachedBase64 = '';
     var densityDebounceId = null;
 
-    function getCompressedBase64() {
+    function getCompressedData() {
       if (cachedCompressed && cachedCompressed.rawBytes === lastRawBytes) return cachedCompressed;
       var compressed = pako.gzip(lastRawBytes);
       var useCompressed = compressed.length < lastRawBytes.length;
       var dataToEncode = useCompressed ? compressed : lastRawBytes;
-      var base64 = bytesToBase64(dataToEncode);
-      cachedCompressed = { rawBytes: lastRawBytes, base64: base64, compressed: compressed, useCompressed: useCompressed };
+      cachedCompressed = { rawBytes: lastRawBytes, dataToEncode: dataToEncode, compressed: compressed, useCompressed: useCompressed };
       return cachedCompressed;
     }
 
@@ -512,15 +516,33 @@
         qr.make();
         return qr.getModuleCount();
       } catch (e) {
+        getQrModuleCount.lastError = e && e.message ? e.message : String(e);
         return 0;
       }
     }
 
+    function chunkPayload(chunk) {
+      return chunk && chunk.bytes instanceof Uint8Array ? chunk.bytes : JSON.stringify(chunk);
+    }
+
     function calcFixedSize(chunksArr) {
       var maxMod = 0;
+      var failedIndex = -1;
       for (var i = 0; i < chunksArr.length; i++) {
-        var m = getQrModuleCount(JSON.stringify(chunksArr[i]));
+        var m = getQrModuleCount(chunkPayload(chunksArr[i]));
+        if (!m) {
+          failedIndex = i;
+          break;
+        }
         if (m > maxMod) maxMod = m;
+      }
+      if (failedIndex !== -1 || !maxMod) {
+        return {
+          w: 440,
+          h: 440,
+          error: 'QR frame ' + (failedIndex + 1) + ' is too large for the selected error correction level.',
+          detail: getQrModuleCount.lastError || ''
+        };
       }
       var cellSize = Math.max(4, Math.floor(400 / maxMod));
       var size = cellSize * maxMod + 40;
@@ -542,6 +564,30 @@
         ctx.fillText('Error: ' + err.message, 20, cvs.height / 2);
         return false;
       }
+    }
+
+    function renderCanvasMessage(cvs, message) {
+      cvs.width = fixedSize.w;
+      cvs.height = fixedSize.h;
+      var ctx = cvs.getContext('2d');
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, cvs.width, cvs.height);
+      ctx.fillStyle = '#B00020';
+      ctx.font = '14px sans-serif';
+      var words = String(message).split(' ');
+      var line = '';
+      var y = 32;
+      for (var i = 0; i < words.length; i++) {
+        var test = line ? line + ' ' + words[i] : words[i];
+        if (ctx.measureText(test).width > cvs.width - 40 && line) {
+          ctx.fillText(line, 20, y);
+          line = words[i];
+          y += 20;
+        } else {
+          line = test;
+        }
+      }
+      if (line) ctx.fillText(line, 20, y);
     }
 
     dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
@@ -691,70 +737,32 @@
       var compressionFlag = useCompressed ? 1 : 0;
 
       var hash = simpleHash(rawBytes);
-      var base64 = bytesToBase64(dataToEncode);
-
-      effectiveChunkSize = userChunkSize;
       var maxForEc = getMaxChunkSize(userEcLevel);
-      if (effectiveChunkSize > maxForEc) effectiveChunkSize = maxForEc;
+      effectiveChunkSize = Math.min(userChunkSize, maxForEc);
 
-      var dataChunkCount = Math.ceil(base64.length / effectiveChunkSize);
-      var dataChunks = [];
-      for (var i = 0; i < dataChunkCount; i++) {
-        dataChunks.push(base64.slice(i * effectiveChunkSize, (i + 1) * effectiveChunkSize));
-      }
-
-      var parityChunkData = [];
-      if (rsParity > 0 && dataChunkCount > 0) {
-        var chunkBytes = dataChunks.map(function(d) {
-          var b = [];
-          for (var c = 0; c < d.length; c++) b.push(d.charCodeAt(c));
-          return new Uint8Array(b);
-        });
-        parityChunkData = ReedSolomon.encode(chunkBytes, rsParity);
-      }
-
-      var totalCount = dataChunkCount + parityChunkData.length;
-      chunks = [];
-
-      for (var di = 0; di < dataChunkCount; di++) {
-        chunks.push({
-          v: 2,
-          i: di,
-          n: totalCount,
-          hash: hash,
+      while (effectiveChunkSize >= 100) {
+        chunks = QrProtocolV3.buildFrames(dataToEncode, {
           name: displayName,
-          gz: compressionFlag,
-          zip: isZip ? 1 : 0,
-          rs: rsParity > 0 ? 1 : 0,
-          k: dataChunkCount,
-          sz: rawBytes.length,
-          t: 'd',
-          d: dataChunks[di]
-        });
-      }
-
-      for (var pi = 0; pi < parityChunkData.length; pi++) {
-        var pRaw = '';
-        for (var b2 = 0; b2 < parityChunkData[pi].length; b2++) {
-          pRaw += String.fromCharCode(parityChunkData[pi][b2]);
-        }
-        chunks.push({
-          v: 2,
-          i: dataChunkCount + pi,
-          n: totalCount,
           hash: hash,
-          name: displayName,
-          gz: compressionFlag,
-          zip: isZip ? 1 : 0,
-          rs: rsParity > 0 ? 1 : 0,
-          k: dataChunkCount,
-          sz: rawBytes.length,
-          t: 'p',
-          d: btoa(pRaw)
+          originalSize: rawBytes.length,
+          chunkBodySize: v3BodyBudget(effectiveChunkSize),
+          gz: compressionFlag === 1,
+          zip: isZip ? true : false,
+          rsParity: rsParity
         });
+        fixedSize = calcFixedSize(chunks);
+        if (!fixedSize.error) break;
+        effectiveChunkSize -= 50;
       }
 
-      fixedSize = calcFixedSize(chunks);
+      if (fixedSize.error) {
+        fileMeta.classList.remove('hidden');
+        fileMeta.innerHTML = '<strong>' + escapeHtml(displayName) + '</strong> &middot; <span class="badge badge-error">' + escapeHtml(fixedSize.error) + '</span>';
+        encodeCard.classList.remove('hidden');
+        qrMeta.innerHTML = '<span class="badge badge-error">' + escapeHtml(fixedSize.error + (fixedSize.detail ? ' ' + fixedSize.detail : '')) + '</span>';
+        renderCanvasMessage(canvas, fixedSize.error + (fixedSize.detail ? ' ' + fixedSize.detail : ''));
+        return;
+      }
 
       fileMeta.classList.remove('hidden');
       fileMeta.innerHTML = '<strong>' + escapeHtml(displayName) + '</strong> &middot; ' + formatSize(rawBytes.length) + ' &middot; ' + chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '') + ' &middot; Hash: <span style="font-size:1em;color:var(--accent)">' + hash + '</span>';
@@ -778,10 +786,10 @@
       setRsParity(rsParity);
 
       encodeCard.classList.remove('hidden');
-      var metaParts = ['Base64 payload: ' + formatSize(base64.length) + ' &middot; chunk size: ' + effectiveChunkSize + ' bytes'];
+      var metaParts = ['Binary payload: ' + formatSize(dataToEncode.length) + ' &middot; chunk size: ' + effectiveChunkSize + ' bytes'];
       if (useCompressed) metaParts.push('<span class="badge badge-comp">gzip compressed</span>');
       if (isZip) metaParts.push('<span class="badge badge-comp">zipped</span>');
-      if (rsParity > 0) metaParts.push('<span class="badge badge-comp">RS +' + parityChunkData.length + ' parity (recover ' + rsParity + ')</span>');
+      if (rsParity > 0) metaParts.push('<span class="badge badge-comp">RS +' + (chunks.length - chunks[0].k) + ' parity (recover ' + rsParity + ')</span>');
       qrMeta.innerHTML = metaParts.join(' &middot; ');
 
       currentFrame = 0;
@@ -793,7 +801,7 @@
 
     function renderFrame(index) {
       var chunk = chunks[index];
-      var payload = JSON.stringify(chunk);
+      var payload = chunkPayload(chunk);
       renderQrToCanvas(canvas, payload);
 
       var pct = ((index + 1) / chunks.length * 100).toFixed(0);
@@ -995,6 +1003,12 @@
 
     btnGif.addEventListener('click', function() {
       if (chunks.length === 0) return;
+      fixedSize = calcFixedSize(chunks);
+      if (fixedSize.error) {
+        gifStatus.classList.remove('hidden');
+        gifStatus.textContent = fixedSize.error;
+        return;
+      }
 
       btnGif.disabled = true;
       gifStatus.classList.remove('hidden');
@@ -1009,14 +1023,20 @@
       var tempCanvas = document.createElement('canvas');
       tempCanvas.width = gw;
       tempCanvas.height = gh;
-      var ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
 
       var frames = [];
 
       for (var loop = 0; loop < loops; loop++) {
         for (var i = 0; i < chunks.length; i++) {
-          var payload = JSON.stringify(chunks[i]);
-          drawQrToCanvas(tempCanvas, payload, gw, gh);
+          var payload = chunkPayload(chunks[i]);
+          try {
+            drawQrToCanvas(tempCanvas, payload, gw, gh);
+          } catch (err) {
+            gifStatus.textContent = 'Error rendering frame ' + (i + 1) + ': ' + (err.message || err);
+            btnGif.disabled = false;
+            return;
+          }
+          var ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
           var imgData = ctx.getImageData(0, 0, gw, gh);
           var pixels = new Uint8Array(gw * gh);
           for (var p = 0; p < pixels.length; p++) {
@@ -1052,6 +1072,12 @@
 
     btnVideo.addEventListener('click', function() {
       if (chunks.length === 0) return;
+      fixedSize = calcFixedSize(chunks);
+      if (fixedSize.error) {
+        videoStatus.classList.remove('hidden');
+        videoStatus.textContent = fixedSize.error;
+        return;
+      }
 
       var mimeType = '';
       var ext = '';
@@ -1128,7 +1154,7 @@
           return;
         }
 
-        var payload = JSON.stringify(frameQueue[qi]);
+        var payload = chunkPayload(frameQueue[qi]);
         drawQrToCanvas(recCanvas, payload, gw, gh);
 
         if (track.requestFrame) {

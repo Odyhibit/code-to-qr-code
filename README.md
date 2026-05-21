@@ -51,33 +51,34 @@ test/test.js            Test suite (43 tests)
 
 Encoder and decoder pages bundle all dependencies locally — no CDN, no build step. They work from `file://`, GitHub Pages, or the dev server.
 
-## Chunk protocol (v2)
+## Chunk protocol (v3)
 
-Each QR code contains a JSON chunk:
+The encoder emits compact binary QR frames. The decoder still accepts the older JSON v1/v2 frames for compatibility.
 
-```json
-{
-  "v": 2, "i": 0, "n": 17,
-  "hash": "a1b2c3d4", "name": "file.txt",
-  "gz": 1, "zip": 0, "rs": 1, "k": 7, "sz": 19721,
-  "t": "d", "d": "base64data..."
-}
+Frame layout:
+
+```text
+"Q3" magic
+flags byte: gzip, zip, Reed-Solomon, parity
+frame index varint
+total frame count varint
+data frame count varint
+binary frame body
 ```
 
-| Field | Description |
-|-------|-------------|
-| `v`   | Protocol version (2) |
-| `i`   | Chunk index (0-based) |
-| `n`   | Total chunks (data + parity) |
-| `hash`| FNV-1a hash of original file |
-| `name`| File name |
-| `gz`  | 1 if gzip-compressed |
-| `zip` | 1 if zip archive |
-| `rs`  | 1 if Reed-Solomon enabled |
-| `k`   | Data chunk count (for RS) |
-| `sz`  | Original file size in bytes |
-| `t`   | `d` = data, `p` = parity |
-| `d`   | Base64 payload |
+Frame 0's body starts with transfer metadata, then binary payload bytes:
+
+```text
+encoded payload size varint
+original file size varint
+frame 0 data byte count varint
+FNV-1a hash uint32
+filename length varint
+filename UTF-8 bytes
+payload bytes
+```
+
+Other data frames contain only binary payload bytes. Parity frames contain Reed-Solomon parity bytes. Reed-Solomon protects data frame bodies, including frame 0 metadata, so a missing metadata frame can be recovered from parity.
 
 ## Testing
 

@@ -737,6 +737,12 @@ var qrcode = function() {
   qrcode.stringToBytesFuncs = {
     'default' : function(s) {
       var bytes = [];
+      if (typeof s !== 'string' && s && typeof s.length == 'number') {
+        for (var j = 0; j < s.length; j += 1) {
+          bytes.push(s[j] & 0xff);
+        }
+        return bytes;
+      }
       for (var i = 0; i < s.length; i += 1) {
         var c = s.charCodeAt(i);
         bytes.push(c & 0xff);

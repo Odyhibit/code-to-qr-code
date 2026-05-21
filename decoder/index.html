@@ -8,6 +8,7 @@
   <script src="pako.min.js"></script>
   <script src="jszip.min.js"></script>
   <script src="reedsolomon.js"></script>
+  <script src="../shared/protocol-v3.js"></script>
   <style>
     :root {
       --bg: #1e1e2e;
@@ -392,6 +393,7 @@
     var camIsZipped = false;
     var camRsEnabled = false;
     var camRsK = 0;
+    var camProtocolVersion = 2;
     var camFacingMode = 'environment';
     var camFrameCount = 0;
     var camLastFpsTime = 0;
@@ -427,6 +429,10 @@
       camFileName = null;
       camIsGzipped = false;
       camOriginalSize = null;
+      camIsZipped = false;
+      camRsEnabled = false;
+      camRsK = 0;
+      camProtocolVersion = 2;
       camFrameCount = 0;
       camLastFpsTime = performance.now();
       camLastFpsCount = 0;
@@ -519,6 +525,7 @@
           for (var i = 0; i < barcodes.length; i++) {
             if (barcodes[i].rawValue) camProcessQR(barcodes[i].rawValue);
           }
+          camFallbackJsQR(vw, vh);
           camAfterScan();
         }).catch(function() {
           camFrameCount++;
@@ -541,7 +548,7 @@
       var code = jsQR(imageData.data, imageData.width, imageData.height, {
         inversionAttempts: 'attemptBoth'
       });
-      if (code && code.data) camProcessQR(code.data);
+      if (code && (code.data || code.binaryData)) camProcessQR(code.data || '', code.binaryData);
     }
 
     function camAfterScan() {
@@ -573,8 +580,42 @@
       if (cameraStream) cameraAnimFrame = requestAnimationFrame(camScanLoop);
     }
 
-    function camProcessQR(data) {
+    function camProcessQR(data, binaryData) {
       try {
+        var v3Frame = decodeV3Frame(data, binaryData);
+        if (v3Frame) {
+          var v3New = camDecodedChunks[v3Frame.i] === undefined;
+          camDecodedChunks[v3Frame.i] = v3Frame;
+          camProtocolVersion = 3;
+
+          if (!camExpectedTotal) {
+            camExpectedTotal = v3Frame.n;
+            camIsGzipped = v3Frame.gz;
+            camIsZipped = v3Frame.zip;
+            camRsEnabled = v3Frame.rs;
+            camRsK = v3Frame.k;
+            if (v3Frame.meta) {
+              camExpectedHash = v3Frame.meta.hash;
+              camFileName = v3Frame.meta.name;
+              camOriginalSize = v3Frame.meta.originalSize;
+            }
+            camInitGrid(camExpectedTotal);
+          } else if (v3Frame.meta) {
+            camExpectedHash = v3Frame.meta.hash;
+            camFileName = v3Frame.meta.name;
+            camOriginalSize = v3Frame.meta.originalSize;
+          }
+          camUpdateGrid();
+          camUpdatePreview();
+
+          if (v3New) {
+            cameraContainer.classList.remove('flash');
+            void cameraContainer.offsetWidth;
+            cameraContainer.classList.add('flash');
+          }
+          return;
+        }
+
         var chunk = JSON.parse(data);
         if ((chunk.v === 1 || chunk.v === 2) && typeof chunk.i === 'number' && typeof chunk.n === 'number' && chunk.d) {
           var isNew = camDecodedChunks[chunk.i] === undefined;
@@ -631,6 +672,10 @@
     }
 
     function camUpdatePreview() {
+      if (camProtocolVersion === 3) {
+        camUpdatePreviewV3();
+        return;
+      }
       var found = Object.keys(camDecodedChunks).length;
       var complete = camExpectedTotal && found >= camExpectedTotal;
       var rsEnough = camRsEnabled && found >= camRsK;
@@ -672,7 +717,48 @@
       }
     }
 
+    function camUpdatePreviewV3() {
+      var found = Object.keys(camDecodedChunks).length;
+      var complete = camExpectedTotal && found >= camExpectedTotal;
+      var rsEnough = camRsEnabled && found >= camRsK;
+      var displayComplete = complete || rsEnough;
+      cameraPreviewBadge.textContent = displayComplete ? (rsEnough && !complete ? 'RS recoverable!' : 'complete!') : found + '/' + (camExpectedTotal || '?') + ' chunks';
+      cameraPreviewBadge.className = 'badge ' + (displayComplete ? 'badge-success' : 'badge-info');
+
+      var first = camDecodedChunks[0];
+      if (!first || !first.meta) {
+        cameraPreviewCode.textContent = '[waiting for metadata frame]';
+        return;
+      }
+
+      try {
+        var bytes = assembleV3PreviewBytes(camDecodedChunks, camRsK, first.meta);
+        if (camIsGzipped) {
+          try { bytes = pako.ungzip(bytes); } catch (e) {
+            cameraPreviewCode.textContent = '[decompressing...]';
+            return;
+          }
+        }
+
+        try {
+          var text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          var lines = text.split('\n');
+          cameraPreviewCode.textContent = lines.length > 20
+            ? lines.slice(0, 20).join('\n') + '\n\n... (' + lines.length + ' lines)'
+            : text;
+        } catch (e) {
+          cameraPreviewCode.textContent = '[Binary — ' + formatSize(bytes.length) + ']';
+        }
+      } catch (e) {
+        cameraPreviewCode.textContent = '[decoding...]';
+      }
+    }
+
     function camFinishDecode(allFound) {
+      if (camProtocolVersion === 3) {
+        camFinishDecodeV3(allFound);
+        return;
+      }
       var base64Chunks = [];
       var hasAll = true;
       for (var i = 0; i < (camExpectedTotal || 0); i++) {
@@ -759,6 +845,68 @@
       }
     }
 
+    function camFinishDecodeV3(allFound) {
+      resultCard.classList.remove('hidden');
+      resultCode.textContent = '';
+
+      var assembled = assembleV3Result(camDecodedChunks, camExpectedTotal, camRsK, camRsEnabled);
+      if (!assembled) {
+        resultBadge.textContent = 'INCOMPLETE';
+        resultBadge.className = 'badge badge-error';
+        resultCode.textContent = 'Incomplete: missing required chunks.';
+        return;
+      }
+
+      var bytes = assembled.bytes;
+      var meta = assembled.meta;
+      camExpectedHash = meta.hash;
+      camFileName = meta.name;
+      camOriginalSize = meta.originalSize;
+
+      try {
+        if (camIsGzipped) {
+          try { bytes = pako.ungzip(bytes); } catch (e) {
+            resultCode.textContent = 'Error: gzip decompression failed.';
+            resultBadge.textContent = 'ERROR';
+            resultBadge.className = 'badge badge-error';
+            return;
+          }
+        }
+
+        var metaHtml = '<span>' + formatSize(bytes.length) + '</span>' +
+          '<span>' + escapeHtml(camFileName || 'unknown') + '</span>' +
+          '<span>Hash: ' + (camExpectedHash || '?') + '</span>';
+        if (camIsGzipped) metaHtml += '<span class="badge badge-info">gzip</span>';
+        if (camIsZipped) metaHtml += '<span class="badge badge-info">zip archive</span>';
+        if (!allFound && assembled.recovered) metaHtml += '<span class="badge badge-comp">RS recovered</span>';
+        resultMeta.innerHTML = metaHtml;
+        resultBadge.textContent = 'VERIFIED';
+        resultBadge.className = 'badge badge-success';
+
+        if (camIsZipped) {
+          resultCode.textContent = '[' + formatSize(bytes.length) + ' ZIP archive — see files below]';
+          showZipBrowser(bytes);
+        } else {
+          var text;
+          try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) { text = '[Binary — use Download]'; }
+          resultCode.textContent = text;
+          btnDownload.onclick = function() {
+            downloadBlob(bytes, camFileName || 'decoded-file');
+          };
+          btnCopy.onclick = function() {
+            navigator.clipboard.writeText(resultCode.textContent).then(function() {
+              btnCopy.textContent = 'Copied!';
+              setTimeout(function() { btnCopy.textContent = 'Copy to Clipboard'; }, 2000);
+            });
+          };
+        }
+      } catch (e) {
+        resultCode.textContent = 'Error: ' + e.message;
+        resultBadge.textContent = 'ERROR';
+        resultBadge.className = 'badge badge-error';
+      }
+    }
+
     function finishCameraDecode(complete) {
       if (complete) {
         camFinishDecode(true);
@@ -803,6 +951,70 @@
     // Trailing null stripping above is safe because valid base64 (ASCII subset)
     // never contains \0 — any nulls are RS padding artifacts from uneven chunks.
 
+    function decodeV3Frame(data, binaryData) {
+      try {
+        if (binaryData && binaryData.length >= 2) {
+          var bytes = binaryData instanceof Uint8Array ? binaryData : new Uint8Array(binaryData);
+          var frame = QrProtocolV3.decodeFrame(bytes);
+          if (frame) return frame;
+        }
+        return QrProtocolV3.decodeFrame(data || '');
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function concatByteParts(parts, limit) {
+      var total = 0;
+      for (var i = 0; i < parts.length; i++) total += parts[i].length;
+      if (typeof limit === 'number') total = Math.min(total, limit);
+      var out = new Uint8Array(total);
+      var offset = 0;
+      for (var p = 0; p < parts.length && offset < total; p++) {
+        var slice = parts[p].subarray(0, Math.min(parts[p].length, total - offset));
+        out.set(slice, offset);
+        offset += slice.length;
+      }
+      return out;
+    }
+
+    function assembleV3PreviewBytes(frameMap, k, meta) {
+      var parts = [meta.data];
+      var total = meta.data.length;
+      for (var i = 1; i < k; i++) {
+        if (!frameMap[i]) break;
+        parts.push(frameMap[i].body);
+        total += frameMap[i].body.length;
+        if (total >= meta.encodedSize) break;
+      }
+      return concatByteParts(parts, meta.encodedSize);
+    }
+
+    function assembleV3Result(frameMap, total, k, rsEnabled) {
+      var dataBodies = [];
+      var hasAllData = true;
+      for (var i = 0; i < k; i++) {
+        if (frameMap[i]) dataBodies[i] = frameMap[i].body;
+        else hasAllData = false;
+      }
+
+      var recovered = false;
+      if (!hasAllData && rsEnabled) {
+        var frames = [];
+        for (var f = 0; f < total; f++) frames[f] = frameMap[f] || null;
+        var decoded = QrProtocolV3.recoverBodies(frames, k);
+        if (!decoded) return null;
+        dataBodies = decoded;
+        recovered = true;
+      } else if (!hasAllData) {
+        return null;
+      }
+
+      var assembled = QrProtocolV3.assembleData(dataBodies);
+      assembled.recovered = recovered;
+      return assembled;
+    }
+
     // ===================== FILE UPLOAD DECODE =====================
 
     var decodedChunks = {};
@@ -814,6 +1026,7 @@
     var isZipped = false;
     var rsEnabled = false;
     var rsK = 0;
+    var protocolVersion = 2;
 
     dropZone.addEventListener('click', function() { fileInput.click(); });
     dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
@@ -851,6 +1064,10 @@
       fileName = null;
       isGzipped = false;
       originalSize = null;
+      isZipped = false;
+      rsEnabled = false;
+      rsK = 0;
+      protocolVersion = 2;
       decodeStatus.textContent = 'Ready to decode';
       decodeProgress.style.width = '0%';
       chunkGrid.innerHTML = '';
@@ -1033,7 +1250,7 @@
           prevData = ctx.getImageData(0, 0, result.width, result.height);
           var fullImg = ctx.getImageData(0, 0, result.width, result.height);
           var code = jsQR(fullImg.data, fullImg.width, fullImg.height, { inversionAttempts: 'attemptBoth' });
-          if (code && code.data) processQRData(code.data);
+          if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
           var pct = ((f + 1) / result.frames.length * 100).toFixed(0);
           decodeProgress.style.width = pct + '%';
           var found = Object.keys(decodedChunks).length;
@@ -1084,7 +1301,7 @@
         var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
         framesScanned++;
-        if (code && code.data) processQRData(code.data);
+        if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
         var pct = Math.min((time / duration) * 100, 99);
         decodeProgress.style.width = pct + '%';
         var found = Object.keys(decodedChunks).length;
@@ -1101,8 +1318,34 @@
       finishDecoding();
     }
 
-    function processQRData(data) {
+    function processQRData(data, binaryData) {
       try {
+        var v3Frame = decodeV3Frame(data, binaryData);
+        if (v3Frame) {
+          decodedChunks[v3Frame.i] = v3Frame;
+          protocolVersion = 3;
+          if (!expectedTotal) {
+            expectedTotal = v3Frame.n;
+            isGzipped = v3Frame.gz;
+            isZipped = v3Frame.zip;
+            rsEnabled = v3Frame.rs;
+            rsK = v3Frame.k;
+            if (v3Frame.meta) {
+              expectedHash = v3Frame.meta.hash;
+              fileName = v3Frame.meta.name;
+              originalSize = v3Frame.meta.originalSize;
+            }
+            initChunkGrid(expectedTotal);
+          } else if (v3Frame.meta) {
+            expectedHash = v3Frame.meta.hash;
+            fileName = v3Frame.meta.name;
+            originalSize = v3Frame.meta.originalSize;
+          }
+          updateChunkGrid();
+          updatePreview();
+          return;
+        }
+
         var chunk = JSON.parse(data);
         if ((chunk.v === 1 || chunk.v === 2) && typeof chunk.i === 'number' && typeof chunk.n === 'number' && chunk.d) {
           decodedChunks[chunk.i] = chunk.d;
@@ -1149,6 +1392,10 @@
     }
 
     function updatePreview() {
+      if (protocolVersion === 3) {
+        updatePreviewV3();
+        return;
+      }
       var found = Object.keys(decodedChunks).length;
       if (found === 0) return;
       previewSection.classList.remove('hidden');
@@ -1166,6 +1413,36 @@
         var binary = atob(base64);
         var bytes = new Uint8Array(binary.length);
         for (var j = 0; j < binary.length; j++) bytes[j] = binary.charCodeAt(j);
+        if (isGzipped) { try { bytes = pako.ungzip(bytes); } catch (e) { previewCode.textContent = '[decompressing...]'; return; } }
+        try {
+          var text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          var lines = text.split('\n');
+          previewCode.textContent = lines.length > 30 ? lines.slice(0, 30).join('\n') + '\n\n... (' + lines.length + ' lines)' : text;
+        } catch (e) { previewCode.textContent = '[Binary — ' + formatSize(bytes.length) + ']'; }
+        previewMeta.innerHTML = '<span>' + formatSize(bytes.length) + '</span>' +
+          (fileName ? '<span>' + escapeHtml(fileName) + '</span>' : '') +
+          (isGzipped ? '<span class="badge badge-info">gzip</span>' : '');
+      } catch (e) { previewCode.textContent = '[decoding...]'; }
+    }
+
+    function updatePreviewV3() {
+      var found = Object.keys(decodedChunks).length;
+      if (found === 0) return;
+      previewSection.classList.remove('hidden');
+      var complete = expectedTotal && found >= expectedTotal;
+      var rsEnough = rsEnabled && found >= rsK;
+      var displayComplete = complete || rsEnough;
+      previewBadge.textContent = displayComplete ? (rsEnough && !complete ? 'RS recoverable' : 'complete') : 'partial (' + found + '/' + expectedTotal + ')';
+      previewBadge.className = 'badge ' + (displayComplete ? 'badge-success' : 'badge-info');
+
+      var first = decodedChunks[0];
+      if (!first || !first.meta) {
+        previewCode.textContent = '[waiting for metadata frame]';
+        return;
+      }
+
+      try {
+        var bytes = assembleV3PreviewBytes(decodedChunks, rsK, first.meta);
         if (isGzipped) { try { bytes = pako.ungzip(bytes); } catch (e) { previewCode.textContent = '[decompressing...]'; return; } }
         try {
           var text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -1198,6 +1475,10 @@
     }
 
     function assembleResult(complete, useRS) {
+      if (protocolVersion === 3) {
+        assembleResultV3(complete, useRS);
+        return;
+      }
       resultCard.classList.remove('hidden');
       resultCode.textContent = '';
       if (!complete && !useRS) { resultBadge.textContent = 'INCOMPLETE'; resultBadge.className = 'badge badge-error'; }
@@ -1245,6 +1526,59 @@
         } else {
           var text;
           try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { text = '[Binary \u2014 use Download]'; }
+          resultCode.textContent = text;
+
+          btnDownload.onclick = function() {
+            downloadBlob(bytes, fileName || 'decoded-file');
+          };
+          btnCopy.onclick = function() {
+            navigator.clipboard.writeText(resultCode.textContent).then(function() {
+              btnCopy.textContent = 'Copied!';
+              setTimeout(function() { btnCopy.textContent = 'Copy to Clipboard'; }, 2000);
+            });
+          };
+        }
+      } catch (e) {
+        resultCode.textContent = 'Error: ' + e.message;
+        resultBadge.textContent = 'ERROR'; resultBadge.className = 'badge badge-error';
+      }
+    }
+
+    function assembleResultV3(complete, useRS) {
+      resultCard.classList.remove('hidden');
+      resultCode.textContent = '';
+
+      var assembled = assembleV3Result(decodedChunks, expectedTotal, rsK, rsEnabled);
+      if (!assembled) {
+        resultBadge.textContent = 'INCOMPLETE';
+        resultBadge.className = 'badge badge-error';
+        resultCode.textContent = 'Incomplete: missing required chunks.';
+        return;
+      }
+
+      var bytes = assembled.bytes;
+      var meta = assembled.meta;
+      expectedHash = meta.hash;
+      fileName = meta.name;
+      originalSize = meta.originalSize;
+
+      try {
+        if (isGzipped) { try { bytes = pako.ungzip(bytes); } catch (e) { resultCode.textContent = 'Error: gzip failed.'; resultBadge.textContent = 'ERROR'; resultBadge.className = 'badge badge-error'; return; } }
+
+        var metaHtml = '<span>' + formatSize(bytes.length) + '</span><span>' + escapeHtml(fileName || 'unknown') + '</span><span>Hash: ' + (expectedHash || '?') + '</span>';
+        if (isGzipped) metaHtml += '<span class="badge badge-info">gzip</span>';
+        if (isZipped) metaHtml += '<span class="badge badge-info">zip archive</span>';
+        if ((useRS || assembled.recovered) && assembled.recovered) metaHtml += '<span class="badge badge-comp">RS recovered</span>';
+        resultMeta.innerHTML = metaHtml;
+        resultBadge.textContent = 'VERIFIED';
+        resultBadge.className = 'badge badge-success';
+
+        if (isZipped) {
+          resultCode.textContent = '[' + formatSize(bytes.length) + ' ZIP archive — see files below]';
+          showZipBrowser(bytes);
+        } else {
+          var text;
+          try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch (e) { text = '[Binary — use Download]'; }
           resultCode.textContent = text;
 
           btnDownload.onclick = function() {

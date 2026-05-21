@@ -8,6 +8,9 @@ const vm = require('vm');
 const rsPath = path.join(__dirname, '..', 'shared', 'reedsolomon.js');
 const rsCode = fs.readFileSync(rsPath, 'utf8');
 vm.runInThisContext(rsCode);
+const protocolV3Path = path.join(__dirname, '..', 'shared', 'protocol-v3.js');
+const protocolV3Code = fs.readFileSync(protocolV3Path, 'utf8');
+vm.runInThisContext(protocolV3Code);
 
 function strToBytes(s) {
   const b = new Uint8Array(s.length);
@@ -264,6 +267,66 @@ describe('FNV-1a hash', () => {
   it('empty input produces valid hash', () => {
     const hash = simpleHash(Buffer.alloc(0));
     assert.match(hash, /^[0-9a-f]{8}$/);
+  });
+});
+
+describe('Protocol v3 binary framing', () => {
+  it('round-trips binary payload without base64 expansion', () => {
+    const data = new Uint8Array(1024);
+    for (let i = 0; i < data.length; i++) data[i] = i & 0xff;
+
+    const frames = QrProtocolV3.buildFrames(data, {
+      name: 'binary.bin',
+      hash: '1234abcd',
+      originalSize: data.length,
+      chunkBodySize: 500,
+      gz: false,
+      zip: false,
+      rsParity: 0
+    });
+
+    assert.strictEqual(frames[0].v, 3);
+    assert.ok(frames.length > 1);
+    assert.ok(!('text' in frames[0]));
+    assert.strictEqual(frames[0].bytes[0], 0x51);
+    assert.strictEqual(frames[0].bytes[1], 0x33);
+    assert.ok(frames[0].bytes.length < 500 + 64);
+
+    const decoded = {};
+    frames.forEach(frame => {
+      const parsed = QrProtocolV3.decodeFrame(frame.bytes);
+      decoded[parsed.i] = parsed;
+    });
+
+    const assembled = QrProtocolV3.assembleData(frames.map(frame => decoded[frame.i].body));
+    assert.strictEqual(assembled.meta.name, 'binary.bin');
+    assert.strictEqual(assembled.meta.hash, '1234abcd');
+    assert.deepStrictEqual(Buffer.from(assembled.bytes), Buffer.from(data));
+  });
+
+  it('recovers missing metadata frame through Reed-Solomon parity', () => {
+    const data = Buffer.from('hello v3 reed-solomon recovery '.repeat(80));
+    const frames = QrProtocolV3.buildFrames(data, {
+      name: 'note.txt',
+      hash: 'a1b2c3d4',
+      originalSize: data.length,
+      chunkBodySize: 300,
+      gz: false,
+      zip: false,
+      rsParity: 2
+    });
+
+    const parsed = new Array(frames.length).fill(null);
+    frames.forEach(frame => {
+      if (frame.i !== 0 && frame.i !== 2) parsed[frame.i] = QrProtocolV3.decodeFrame(frame.bytes);
+    });
+
+    const recovered = QrProtocolV3.recoverBodies(parsed, frames[0].k);
+    assert.ok(recovered);
+    const assembled = QrProtocolV3.assembleData(recovered);
+    assert.strictEqual(assembled.meta.name, 'note.txt');
+    assert.strictEqual(assembled.meta.hash, 'a1b2c3d4');
+    assert.deepStrictEqual(Buffer.from(assembled.bytes), Buffer.from(data));
   });
 });
 
