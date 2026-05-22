@@ -29,7 +29,7 @@ Open `encoder/index.html` or `decoder/index.html` directly in a browser. Camera 
 - Gzip compression
 - GIF, MP4, and WebM export
 - Reed-Solomon erasure coding (+2/+5/+10 parity chunks)
-- Adjustable chunk size (100–800 B) and QR error correction level (L/M/Q/H)
+- Adjustable QR version and QR error correction level (L/M/Q/H)
 
 **Decoding:**
 - Live camera scan with native `BarcodeDetector` (hardware-accelerated) + jsQR fallback
@@ -86,12 +86,12 @@ Other data frames contain only binary payload bytes. Parity frames contain Reed-
 npm test
 ```
 
-43 tests covering GF(256) arithmetic, Reed-Solomon encode/decode, recovery scenarios, path traversal protection, GIF parser bounds checking, and the full encode→RS→recover→decompress pipeline.
+45 tests covering GF(256) arithmetic, Reed-Solomon encode/decode, recovery scenarios, v3 binary framing, path traversal protection, GIF parser bounds checking, and the full encode→RS→recover→decompress pipeline.
 
 ## Camera tips
 
-- **Fast scanning**: chunk size 300 + EC level L = larger cells, easier to scan
-- **Fewer frames**: chunk size 800 + EC level M = fewer QR codes in the sequence
+- **Fast scanning**: lower QR version + EC level L = larger cells, easier to scan
+- **Fewer frames**: higher QR version + EC level M = fewer QR codes in the sequence
 - **Missed chunks**: add +2 or +5 RS parity to recover from dropped frames
 - **Encoder FPS**: start at 3–6 FPS and adjust
 

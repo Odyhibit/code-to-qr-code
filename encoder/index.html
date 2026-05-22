@@ -233,9 +233,9 @@
     <div class="hidden" id="density-section" style="margin-top:12px;">
       <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:8px;">
-          <label style="font-size:0.9em;">Chunk size:</label>
-          <input type="range" id="chunk-size-slider" min="100" max="800" step="50" value="500" style="width:120px;">
-          <span id="chunk-size-val" style="font-size:0.85em;min-width:50px;">500</span>
+          <label style="font-size:0.9em;">QR version:</label>
+          <input type="range" id="qr-version-slider" min="1" max="40" step="1" value="12" style="width:120px;">
+          <span id="qr-version-val" style="font-size:0.85em;min-width:95px;">v12 · 65x65</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <label style="font-size:0.9em;">Error correction:</label>
@@ -248,6 +248,7 @@
         </div>
         <span class="badge" id="density-info">—</span>
       </div>
+      <div class="export-status hidden" id="encoder-error" style="margin-top:8px;"></div>
     </div>
   </div>
 
@@ -347,12 +348,37 @@
     var rsParity = 0;
 
     var densitySection = document.getElementById('density-section');
-    var chunkSizeSlider = document.getElementById('chunk-size-slider');
-    var chunkSizeVal = document.getElementById('chunk-size-val');
+    var qrVersionSlider = document.getElementById('qr-version-slider');
+    var qrVersionVal = document.getElementById('qr-version-val');
     var ecLevelSelect = document.getElementById('ec-level');
     var densityInfo = document.getElementById('density-info');
-    var userChunkSize = 500;
+    var encoderError = document.getElementById('encoder-error');
+    var userQrVersion = 12;
     var userEcLevel = 'M';
+
+    var QR_BYTE_CAPACITY = {
+      L: [0,17,32,53,78,106,134,154,192,230,271,321,367,425,458,520,586,644,718,792,858,929,1003,1091,1171,1273,1367,1465,1528,1628,1732,1840,1952,2068,2188,2303,2431,2563,2699,2809,2953],
+      M: [0,14,26,42,62,84,106,122,152,180,213,251,287,331,362,412,450,504,560,624,666,711,779,857,911,997,1059,1125,1190,1264,1370,1452,1538,1628,1722,1809,1911,1989,2099,2213,2331],
+      Q: [0,11,20,32,46,60,74,86,108,130,151,177,203,241,258,292,322,364,394,442,482,509,565,611,661,715,751,805,868,908,982,1030,1112,1168,1228,1283,1351,1423,1499,1579,1663],
+      H: [0,7,14,24,34,44,58,64,84,98,119,137,155,177,194,220,250,280,310,338,382,403,439,461,511,535,593,625,658,698,742,790,842,898,958,983,1051,1093,1139,1219,1273]
+    };
+
+    function updateQrVersionLabel() {
+      var modules = userQrVersion * 4 + 17;
+      qrVersionVal.textContent = 'v' + userQrVersion + ' · ' + modules + 'x' + modules;
+    }
+    updateQrVersionLabel();
+
+    function showEncoderError(message) {
+      encoderError.textContent = message;
+      encoderError.classList.remove('hidden');
+      encoderError.style.color = 'var(--error)';
+    }
+
+    function clearEncoderError() {
+      encoderError.textContent = '';
+      encoderError.classList.add('hidden');
+    }
 
     function setRsParity(n) {
       rsParity = n;
@@ -369,75 +395,90 @@
     btnRs5.addEventListener('click', function() { setRsParity(5); reEncode(); });
     btnRs10.addEventListener('click', function() { setRsParity(10); reEncode(); });
 
-    chunkSizeSlider.addEventListener('input', function() {
-      userChunkSize = parseInt(chunkSizeSlider.value);
-      chunkSizeVal.textContent = userChunkSize;
-      debouncedUpdateDensityInfo();
+    qrVersionSlider.addEventListener('input', function() {
+      stopPlayback();
+      userQrVersion = parseInt(qrVersionSlider.value);
+      updateQrVersionLabel();
+      updateDensityInfo();
     });
-    chunkSizeSlider.addEventListener('change', function() { reEncode(); });
+    qrVersionSlider.addEventListener('change', function() {
+      reEncode();
+    });
     ecLevelSelect.addEventListener('change', function() {
       userEcLevel = ecLevelSelect.value;
       updateDensityInfo();
       reEncode();
     });
 
-    var maxChunkSizeCache = {};
-
-    function v3BodyBudget(frameBudget) {
-      return Math.max(1, frameBudget - 24);
+    function getSelectedQrCapacity() {
+      return QR_BYTE_CAPACITY[userEcLevel][userQrVersion];
     }
 
-    function getMaxChunkSize(ec) {
-      if (maxChunkSizeCache[ec]) return maxChunkSizeCache[ec];
-      var sizes = [800, 750, 700, 650, 600, 550, 500, 450, 400, 350, 300, 250, 200, 150, 100];
-      for (var s = 0; s < sizes.length; s++) {
-        var frames = QrProtocolV3.buildFrames(new Uint8Array(sizes[s] * 2), {
-          name: 'x'.repeat(40), hash: '12345678', originalSize: 99999,
-          chunkBodySize: v3BodyBudget(sizes[s]), gz: true, zip: false, rsParity: 1
+    function buildFramesForCapacity(dataBytes, options, capacity) {
+      var low = 1;
+      var high = capacity;
+      var best = null;
+      var bestBodySize = 0;
+      while (low <= high) {
+        var mid = Math.floor((low + high) / 2);
+        var frames = QrProtocolV3.buildFrames(dataBytes, {
+          name: options.name,
+          hash: options.hash,
+          originalSize: options.originalSize,
+          chunkBodySize: mid,
+          gz: options.gz,
+          zip: options.zip,
+          rsParity: options.rsParity
         });
-        var payload = frames[0].bytes;
-        try {
-          var qr = qrcode(0, ec);
-          qr.addData(payload);
-          qr.make();
-          maxChunkSizeCache[ec] = sizes[s];
-          return sizes[s];
-        } catch (e) { continue; }
+        var fits = true;
+        for (var i = 0; i < frames.length; i++) {
+          if (frames[i].bytes.length > capacity) {
+            fits = false;
+            break;
+          }
+        }
+        if (fits) {
+          best = frames;
+          bestBodySize = mid;
+          low = mid + 1;
+        } else {
+          high = mid - 1;
+        }
       }
-      maxChunkSizeCache[ec] = 100;
-      return 100;
+      return { frames: best, bodySize: bestBodySize };
     }
 
     function updateDensityInfo() {
-      if (!lastRawBytes) { densityInfo.textContent = '—'; return; }
-      var info = getCompressedData();
-      var frames = QrProtocolV3.buildFrames(info.dataToEncode, {
-        name: lastDisplayName || 'file', hash: '12345678', originalSize: lastRawBytes.length,
-        chunkBodySize: v3BodyBudget(userChunkSize), gz: info.useCompressed, zip: lastIsZip, rsParity: rsParity
-      });
-      var payload = frames[0].bytes;
-      try {
-        var qr = qrcode(0, userEcLevel);
-        qr.addData(payload);
-        qr.make();
-        var modules = qr.getModuleCount();
-        var cellSize = Math.floor(400 / modules);
-        var ver = Math.round((modules - 17) / 4);
-        densityInfo.textContent = frames.length + ' chunks \u00b7 v' + ver + ' QR \u00b7 ' + cellSize + 'px cells';
-        densityInfo.className = 'badge ' + (cellSize >= 5 ? 'badge-success' : cellSize >= 3 ? 'badge-info' : 'badge-error');
-      } catch (e) {
-        var max = getMaxChunkSize(userEcLevel);
-        densityInfo.textContent = 'too large (max ' + max + ')';
-        densityInfo.className = 'badge badge-error';
+      var capacity = getSelectedQrCapacity();
+      var modules = userQrVersion * 4 + 17;
+      if (!lastRawBytes) {
+        densityInfo.textContent = 'capacity ' + capacity + ' bytes/frame · ' + modules + 'x' + modules + ' modules';
+        densityInfo.className = 'badge badge-info';
+        return;
       }
+      var info = getCompressedData();
+      var built = buildFramesForCapacity(info.dataToEncode, {
+        name: lastDisplayName || 'file',
+        hash: '12345678',
+        originalSize: lastRawBytes.length,
+        gz: info.useCompressed,
+        zip: lastIsZip,
+        rsParity: rsParity
+      }, capacity);
+      if (!built.frames) {
+        densityInfo.textContent = 'metadata too large for selected version';
+        densityInfo.className = 'badge badge-error';
+        return;
+      }
+      var cellSize = Math.floor(400 / modules);
+      densityInfo.textContent = built.frames.length + ' chunks · ' + built.bodySize + ' body bytes/frame · capacity ' + capacity + ' · ' + modules + 'x' + modules + ' modules';
+      densityInfo.className = 'badge ' + (cellSize >= 5 ? 'badge-success' : cellSize >= 3 ? 'badge-info' : 'badge-error');
     }
 
     var lastRawBytes = null;
     var lastDisplayName = '';
     var lastIsZip = false;
     var cachedCompressed = null;
-    var cachedBase64 = '';
-    var densityDebounceId = null;
 
     function getCompressedData() {
       if (cachedCompressed && cachedCompressed.rawBytes === lastRawBytes) return cachedCompressed;
@@ -446,11 +487,6 @@
       var dataToEncode = useCompressed ? compressed : lastRawBytes;
       cachedCompressed = { rawBytes: lastRawBytes, dataToEncode: dataToEncode, compressed: compressed, useCompressed: useCompressed };
       return cachedCompressed;
-    }
-
-    function debouncedUpdateDensityInfo() {
-      if (densityDebounceId) clearTimeout(densityDebounceId);
-      densityDebounceId = setTimeout(updateDensityInfo, 150);
     }
 
     function reEncode() {
@@ -478,7 +514,7 @@
     }
 
     function drawQrToCanvas(cvs, text, fixedWidth, fixedHeight) {
-      var qr = qrcode(0, userEcLevel);
+      var qr = qrcode(userQrVersion, userEcLevel);
       qr.addData(text);
       qr.make();
 
@@ -511,7 +547,7 @@
 
     function getQrModuleCount(text) {
       try {
-        var qr = qrcode(0, userEcLevel);
+        var qr = qrcode(userQrVersion, userEcLevel);
         qr.addData(text);
         qr.make();
         return qr.getModuleCount();
@@ -540,7 +576,7 @@
         return {
           w: 440,
           h: 440,
-          error: 'QR frame ' + (failedIndex + 1) + ' is too large for the selected error correction level.',
+          error: 'QR frame ' + (failedIndex + 1) + ' is too large for the selected version and error correction level.',
           detail: getQrModuleCount.lastError || ''
         };
       }
@@ -554,14 +590,7 @@
         drawQrToCanvas(cvs, text, fixedSize.w, fixedSize.h);
         return true;
       } catch (err) {
-        var ctx = cvs.getContext('2d');
-        cvs.width = fixedSize.w;
-        cvs.height = fixedSize.h;
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, cvs.width, cvs.height);
-        ctx.fillStyle = '#FF0000';
-        ctx.font = '14px sans-serif';
-        ctx.fillText('Error: ' + err.message, 20, cvs.height / 2);
+        renderCanvasMessage(cvs, 'Error: ' + (err.message || err));
         return false;
       }
     }
@@ -686,7 +715,7 @@
           var rawBytes = new Uint8Array(reader.result);
           encodeBytes(rawBytes, file.name, false);
         } catch (err) {
-          alert('Error: ' + err.message);
+          showEncoderError('Error reading file: ' + (err.message || err));
           console.error(err);
         }
       };
@@ -726,6 +755,7 @@
 
     function encodeBytes(rawBytes, displayName, isZip) {
       stopPlayback();
+      clearEncoderError();
       lastRawBytes = rawBytes;
       lastDisplayName = displayName;
       lastIsZip = isZip;
@@ -737,29 +767,31 @@
       var compressionFlag = useCompressed ? 1 : 0;
 
       var hash = simpleHash(rawBytes);
-      var maxForEc = getMaxChunkSize(userEcLevel);
-      effectiveChunkSize = Math.min(userChunkSize, maxForEc);
-
-      while (effectiveChunkSize >= 100) {
-        chunks = QrProtocolV3.buildFrames(dataToEncode, {
-          name: displayName,
-          hash: hash,
-          originalSize: rawBytes.length,
-          chunkBodySize: v3BodyBudget(effectiveChunkSize),
-          gz: compressionFlag === 1,
-          zip: isZip ? true : false,
-          rsParity: rsParity
-        });
-        fixedSize = calcFixedSize(chunks);
-        if (!fixedSize.error) break;
-        effectiveChunkSize -= 50;
-      }
+      var capacity = getSelectedQrCapacity();
+      var built = buildFramesForCapacity(dataToEncode, {
+        name: displayName,
+        hash: hash,
+        originalSize: rawBytes.length,
+        gz: compressionFlag === 1,
+        zip: isZip ? true : false,
+        rsParity: rsParity
+      }, capacity);
+      chunks = built.frames || [];
+      effectiveChunkSize = built.bodySize;
+      fixedSize = chunks.length ? calcFixedSize(chunks) : {
+        w: 440,
+        h: 440,
+        error: 'Metadata is too large for the selected QR version and error correction level.',
+        detail: ''
+      };
 
       if (fixedSize.error) {
         fileMeta.classList.remove('hidden');
         fileMeta.innerHTML = '<strong>' + escapeHtml(displayName) + '</strong> &middot; <span class="badge badge-error">' + escapeHtml(fixedSize.error) + '</span>';
+        densitySection.classList.remove('hidden');
         encodeCard.classList.remove('hidden');
         qrMeta.innerHTML = '<span class="badge badge-error">' + escapeHtml(fixedSize.error + (fixedSize.detail ? ' ' + fixedSize.detail : '')) + '</span>';
+        showEncoderError(fixedSize.error + (fixedSize.detail ? ' ' + fixedSize.detail : ''));
         renderCanvasMessage(canvas, fixedSize.error + (fixedSize.detail ? ' ' + fixedSize.detail : ''));
         return;
       }
@@ -786,7 +818,12 @@
       setRsParity(rsParity);
 
       encodeCard.classList.remove('hidden');
-      var metaParts = ['Binary payload: ' + formatSize(dataToEncode.length) + ' &middot; chunk size: ' + effectiveChunkSize + ' bytes'];
+      var metaParts = [
+        'Binary payload: ' + formatSize(dataToEncode.length),
+        'QR v' + userQrVersion + '-' + userEcLevel,
+        'capacity: ' + capacity + ' bytes/frame',
+        'body: ' + effectiveChunkSize + ' bytes/frame'
+      ];
       if (useCompressed) metaParts.push('<span class="badge badge-comp">gzip compressed</span>');
       if (isZip) metaParts.push('<span class="badge badge-comp">zipped</span>');
       if (rsParity > 0) metaParts.push('<span class="badge badge-comp">RS +' + (chunks.length - chunks[0].k) + ' parity (recover ' + rsParity + ')</span>');
@@ -1096,7 +1133,8 @@
       }
 
       if (!mimeType) {
-        alert('Your browser does not support video recording. Try Chrome or Edge.');
+        videoStatus.classList.remove('hidden');
+        videoStatus.textContent = 'Your browser does not support video recording. Try Chrome or Edge.';
         return;
       }
 
