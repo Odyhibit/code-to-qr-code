@@ -398,20 +398,9 @@
     var camFrameCount = 0;
     var camLastFpsTime = 0;
     var camLastFpsCount = 0;
-    var barcodeDetector = null;
     var camScanning = false;
-    var camFallbackCanvas = document.createElement('canvas');
-    var camFallbackCtx = camFallbackCanvas.getContext('2d', { willReadFrequently: true });
-
-    if ('BarcodeDetector' in window) {
-      BarcodeDetector.getSupportedFormats().then(function(formats) {
-        if (formats.indexOf('qr_code') >= 0) {
-          barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] });
-          cameraScannerBadge.textContent = 'Native';
-          cameraScannerBadge.className = 'badge badge-success';
-        }
-      }).catch(function() {});
-    }
+    var camScanCanvas = document.createElement('canvas');
+    var camScanCtx = camScanCanvas.getContext('2d', { willReadFrequently: true });
 
     btnCameraStart.addEventListener('click', startCamera);
     btnCameraStop.addEventListener('click', stopCamera);
@@ -519,32 +508,17 @@
 
       camScanning = true;
 
-      if (barcodeDetector) {
-        barcodeDetector.detect(cameraVideo).then(function(barcodes) {
-          camFrameCount++;
-          for (var i = 0; i < barcodes.length; i++) {
-            if (barcodes[i].rawValue) camProcessQR(barcodes[i].rawValue);
-          }
-          camFallbackJsQR(vw, vh);
-          camAfterScan();
-        }).catch(function() {
-          camFrameCount++;
-          camFallbackJsQR(vw, vh);
-          camAfterScan();
-        });
-      } else {
-        camFrameCount++;
-        camFallbackJsQR(vw, vh);
-        camAfterScan();
-      }
+      camFrameCount++;
+      camScanJsQR(vw, vh);
+      camAfterScan();
     }
 
-    function camFallbackJsQR(vw, vh) {
+    function camScanJsQR(vw, vh) {
       var scale = Math.min(1, 800 / vw);
-      camFallbackCanvas.width = Math.round(vw * scale);
-      camFallbackCanvas.height = Math.round(vh * scale);
-      camFallbackCtx.drawImage(cameraVideo, 0, 0, camFallbackCanvas.width, camFallbackCanvas.height);
-      var imageData = camFallbackCtx.getImageData(0, 0, camFallbackCanvas.width, camFallbackCanvas.height);
+      camScanCanvas.width = Math.round(vw * scale);
+      camScanCanvas.height = Math.round(vh * scale);
+      camScanCtx.drawImage(cameraVideo, 0, 0, camScanCanvas.width, camScanCanvas.height);
+      var imageData = camScanCtx.getImageData(0, 0, camScanCanvas.width, camScanCanvas.height);
       var code = jsQR(imageData.data, imageData.width, imageData.height, {
         inversionAttempts: 'attemptBoth'
       });

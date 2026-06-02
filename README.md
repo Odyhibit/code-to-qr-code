@@ -32,7 +32,7 @@ Open `encoder/index.html` or `decoder/index.html` directly in a browser. Camera 
 - Adjustable QR version and QR error correction level (L/M/Q/H)
 
 **Decoding:**
-- Live camera scan with native `BarcodeDetector` (hardware-accelerated) + jsQR fallback
+- Live camera scan with jsQR, including raw binary QR payloads
 - GIF and video upload decoding
 - Progressive preview as chunks arrive
 - RS recovery of missing chunks
@@ -98,7 +98,7 @@ npm test
 ## Requirements
 
 - Node.js (for dev server and tests)
-- Chrome recommended (BarcodeDetector API support)
+- Chrome recommended
 - OpenSSL optional (server falls back to JS cert generation)
 
 ## License
