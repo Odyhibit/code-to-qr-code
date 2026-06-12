@@ -235,7 +235,7 @@
         <div style="display:flex;align-items:center;gap:8px;">
           <label style="font-size:0.9em;">QR version:</label>
           <input type="range" id="qr-version-slider" min="1" max="40" step="1" value="17" style="width:120px;">
-          <span id="qr-version-val" style="font-size:0.85em;min-width:95px;">v12 · 65x65</span>
+          <span id="qr-version-val" style="font-size:0.85em;min-width:95px;">v17 · 85x85</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <label style="font-size:0.9em;">Error correction:</label>
@@ -284,7 +284,7 @@
       <div class="export-options">
         <button id="btn-gif">Export GIF</button>
         <button id="btn-video">Export Video (MP4/WebM)</button>
-        <label>Loops: <input type="number" id="gif-loops" value="2" min="1" max="10"></label>
+        <label>Loops: <input type="number" id="gif-loops" value="1" min="1" max="10"></label>
         <label>Delay (ms): <input type="number" id="gif-delay" value="400" min="100" max="2000" step="50"></label>
       </div>
       <div class="export-status hidden" id="gif-status"></div>
@@ -342,7 +342,7 @@
     var playing = false;
     var fps = 3;
     var loopCount = 1;
-    var intervalId = null;
+    var playTimer = null;
     var effectiveChunkSize = 500;
     var fixedSize = { w: 440, h: 440 };
     var rsParity = 0;
@@ -353,7 +353,7 @@
     var ecLevelSelect = document.getElementById('ec-level');
     var densityInfo = document.getElementById('density-info');
     var encoderError = document.getElementById('encoder-error');
-    var userQrVersion = 12;
+    var userQrVersion = 17;
     var userEcLevel = 'M';
 
     var QR_BYTE_CAPACITY = {
@@ -513,9 +513,9 @@
       return btoa(str);
     }
 
-    function drawQrToCanvas(cvs, text, fixedWidth, fixedHeight) {
+    function drawQrToCanvas(cvs, data, fixedWidth, fixedHeight) {
       var qr = qrcode(userQrVersion, userEcLevel);
-      qr.addData(text);
+      qr.addData(data);
       qr.make();
 
       var moduleCount = qr.getModuleCount();
@@ -545,43 +545,14 @@
       }
     }
 
-    function getQrModuleCount(text) {
-      try {
-        var qr = qrcode(userQrVersion, userEcLevel);
-        qr.addData(text);
-        qr.make();
-        return qr.getModuleCount();
-      } catch (e) {
-        getQrModuleCount.lastError = e && e.message ? e.message : String(e);
-        return 0;
-      }
-    }
-
     function chunkPayload(chunk) {
       return chunk && chunk.bytes instanceof Uint8Array ? chunk.bytes : JSON.stringify(chunk);
     }
 
     function calcFixedSize(chunksArr) {
-      var maxMod = 0;
-      var failedIndex = -1;
-      for (var i = 0; i < chunksArr.length; i++) {
-        var m = getQrModuleCount(chunkPayload(chunksArr[i]));
-        if (!m) {
-          failedIndex = i;
-          break;
-        }
-        if (m > maxMod) maxMod = m;
-      }
-      if (failedIndex !== -1 || !maxMod) {
-        return {
-          w: 440,
-          h: 440,
-          error: 'QR frame ' + (failedIndex + 1) + ' is too large for the selected version and error correction level.',
-          detail: getQrModuleCount.lastError || ''
-        };
-      }
-      var cellSize = Math.max(4, Math.floor(400 / maxMod));
-      var size = cellSize * maxMod + 40;
+      var modules = userQrVersion * 4 + 17;
+      var cellSize = Math.max(4, Math.floor(400 / modules));
+      var size = cellSize * modules + 40;
       return { w: size, h: size };
     }
 
@@ -861,14 +832,14 @@
       playing = true;
       btnPlay.disabled = true;
       btnPause.disabled = false;
-      intervalId = setInterval(nextFrame, 1000 / fps);
+      playTimer = setInterval(nextFrame, 1000 / fps);
     }
 
     function stopPlayback() {
       playing = false;
       btnPlay.disabled = false;
       btnPause.disabled = true;
-      if (intervalId) { clearInterval(intervalId); intervalId = null; }
+      if (playTimer) { clearInterval(playTimer); playTimer = null; }
     }
 
     btnPlay.addEventListener('click', startPlayback);
@@ -894,8 +865,8 @@
       fps = parseInt(e.target.value);
       fpsVal.textContent = fps;
       if (playing) {
-        clearInterval(intervalId);
-        intervalId = setInterval(nextFrame, 1000 / fps);
+        clearInterval(playTimer);
+        playTimer = setInterval(nextFrame, 1000 / fps);
       }
     });
 
@@ -970,7 +941,7 @@
         return output;
       }
 
-      function encode(frames, width, height, delayMs, loops) {
+      function* encode(frames, width, height, delayMs, loops) {
         var buf = [];
 
         writeString(buf, 'GIF89a');
@@ -1028,6 +999,8 @@
             }
           }
           writeByte(buf, 0);
+
+          if ((f + 1) % 20 === 0) yield;
         }
 
         writeByte(buf, 0x3b);
@@ -1035,17 +1008,21 @@
         return new Uint8Array(buf);
       }
 
-      return { encode: encode };
+      async function encodeAsync(frames, width, height, delayMs, loops) {
+        var gen = encode(frames, width, height, delayMs, loops);
+        var step;
+        while (!(step = gen.next()).done) {
+          await new Promise(function(r) { setTimeout(r, 0); });
+        }
+        return step.value;
+      }
+
+      return { encode: encodeAsync };
     })();
 
-    btnGif.addEventListener('click', function() {
+    btnGif.addEventListener('click', async function() {
       if (chunks.length === 0) return;
       fixedSize = calcFixedSize(chunks);
-      if (fixedSize.error) {
-        gifStatus.classList.remove('hidden');
-        gifStatus.textContent = fixedSize.error;
-        return;
-      }
 
       btnGif.disabled = true;
       gifStatus.classList.remove('hidden');
@@ -1060,6 +1037,7 @@
       var tempCanvas = document.createElement('canvas');
       tempCanvas.width = gw;
       tempCanvas.height = gh;
+      var ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
 
       var frames = [];
 
@@ -1073,38 +1051,40 @@
             btnGif.disabled = false;
             return;
           }
-          var ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
           var imgData = ctx.getImageData(0, 0, gw, gh);
           var pixels = new Uint8Array(gw * gh);
           for (var p = 0; p < pixels.length; p++) {
             pixels[p] = (imgData.data[p * 4] < 128) ? 1 : 0;
           }
           frames.push(pixels);
+
+          if (frames.length % 20 === 0) {
+            gifStatus.textContent = 'Captured ' + frames.length + '/' + totalFrames + ' frames...';
+            await new Promise(function(r) { setTimeout(r, 0); });
+          }
         }
-        gifStatus.textContent = 'Captured ' + frames.length + '/' + totalFrames + ' frames...';
       }
 
       gifStatus.textContent = 'Encoding GIF (' + frames.length + ' frames)...';
+      await new Promise(function(r) { setTimeout(r, 0); });
 
-      setTimeout(function() {
-        try {
-          var gifBytes = SimpleGifEncoder.encode(frames, gw, gh, delay, loops);
-          var blob = new Blob([gifBytes], { type: 'image/gif' });
-          var url = URL.createObjectURL(blob);
-          var a = document.createElement('a');
-          a.href = url;
-          var baseName = chunks[0].name || 'file';
-          a.download = baseName + '.qr.gif';
-          a.click();
-          URL.revokeObjectURL(url);
+      try {
+        var gifBytes = await SimpleGifEncoder.encode(frames, gw, gh, delay, loops);
+        var blob = new Blob([gifBytes], { type: 'image/gif' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        var baseName = chunks[0].name || 'file';
+        a.download = baseName + '.qr.gif';
+        a.click();
+        URL.revokeObjectURL(url);
 
-          gifStatus.textContent = 'Done! GIF saved (' + formatSize(blob.size) + ', ' + frames.length + ' frames)';
-        } catch (err) {
-          gifStatus.textContent = 'Error: ' + err.message;
-          console.error(err);
-        }
-        btnGif.disabled = false;
-      }, 50);
+        gifStatus.textContent = 'Done! GIF saved (' + formatSize(blob.size) + ', ' + frames.length + ' frames)';
+      } catch (err) {
+        gifStatus.textContent = 'Error: ' + err.message;
+        console.error(err);
+      }
+      btnGif.disabled = false;
     });
 
     btnVideo.addEventListener('click', function() {

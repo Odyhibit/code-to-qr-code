@@ -1188,10 +1188,76 @@
         return { frames: frames, width: screenW, height: screenH };
       }
 
-      return { parseFrames: parseFrames };
+      function* parseFramesGen(gifData) {
+        var d = gifData;
+        var pos = 0;
+        if (d[0] !== 0x47 || d[1] !== 0x49 || d[2] !== 0x46) return;
+        pos = 6;
+        var screenW = d[pos] | (d[pos + 1] << 8); pos += 2;
+        var screenH = d[pos] | (d[pos + 1] << 8); pos += 2;
+        var packed = d[pos]; pos++;
+        pos += 2;
+        var gctFlag = (packed >> 7) & 1;
+        var gctSize = gctFlag ? (3 * (1 << ((packed & 7) + 1))) : 0;
+        var gct = null;
+        if (gctFlag) {
+          gct = new Uint8Array(gctSize);
+          for (var gi = 0; gi < gctSize; gi++) gct[gi] = d[pos + gi];
+          pos += gctSize;
+        }
+        yield { type: 'header', width: screenW, height: screenH };
+        var transIdx = -1;
+        while (pos < d.length - 1) {
+          var b = d[pos];
+          if (b === 0x3B) break;
+          if (b === 0x21) {
+            if (pos + 2 > d.length) break;
+            pos++; var label = d[pos]; pos++;
+            if (label === 0xF9) {
+              if (pos + 5 > d.length) break;
+              pos++; var gcPacked = d[pos]; pos++;
+              transIdx = (gcPacked & 1) ? d[pos + 2] : -1;
+              pos += 3; pos++;
+            } else {
+              while (pos < d.length) { var esz = d[pos]; pos++; if (esz === 0) break; if (pos + esz > d.length) break; pos += esz; }
+            }
+          } else if (b === 0x2C) {
+            if (pos + 9 > d.length) break;
+            pos++;
+            var imgL = d[pos] | (d[pos + 1] << 8); pos += 2;
+            var imgT = d[pos] | (d[pos + 1] << 8); pos += 2;
+            var imgW = d[pos] | (d[pos + 1] << 8); pos += 2;
+            var imgH = d[pos] | (d[pos + 1] << 8); pos += 2;
+            var imgPacked = d[pos]; pos++;
+            var lct = gct;
+            if ((imgPacked >> 7) & 1) {
+              var lctSize = 3 * (1 << ((imgPacked & 7) + 1));
+              if (pos + lctSize > d.length) break;
+              lct = new Uint8Array(d.buffer, d.byteOffset + pos, lctSize);
+              pos += lctSize;
+            }
+            if (pos >= d.length) break;
+            var minCodeSz = d[pos]; pos++;
+            var lzwBytes = [];
+            while (pos < d.length) { var fsz = d[pos]; pos++; if (fsz === 0) break; if (pos + fsz > d.length) break; for (var fj = 0; fj < fsz; fj++) lzwBytes.push(d[pos++]); }
+            var pixels = lzwDecode(lzwBytes, minCodeSz, imgW * imgH);
+            var rgba = new Uint8ClampedArray(imgW * imgH * 4);
+            var ct = lct || gct;
+            if (!ct) { yield { type: 'frame', rgba: rgba, width: imgW, height: imgH, left: imgL, top: imgT }; continue; }
+            for (var fp = 0; fp < pixels.length; fp++) {
+              var ci = pixels[fp]; var off = ci * 3;
+              if (off + 2 >= ct.length) continue;
+              rgba[fp * 4] = ct[off]; rgba[fp * 4 + 1] = ct[off + 1]; rgba[fp * 4 + 2] = ct[off + 2]; rgba[fp * 4 + 3] = (ci === transIdx) ? 0 : 255;
+            }
+            yield { type: 'frame', rgba: rgba, width: imgW, height: imgH, left: imgL, top: imgT };
+          } else { pos++; }
+        }
+      }
+
+      return { parseFrames: parseFrames, parseFramesGen: parseFramesGen };
     })();
 
-    function decodeGif() {
+    async function decodeGif() {
       cancelling = false;
       btnDecode.disabled = true;
       btnCancel.classList.remove('hidden');
@@ -1199,37 +1265,50 @@
       expectedTotal = null;
 
       var reader = new FileReader();
-      reader.onload = function() {
+      reader.onload = async function() {
         var data = new Uint8Array(reader.result);
-        var result = GifParser.parseFrames(data);
 
-        if (!result || result.frames.length === 0) {
+        decodeStatus.textContent = 'Parsing GIF...';
+        await new Promise(function(r) { setTimeout(r, 0); });
+
+        var gen = GifParser.parseFramesGen(data);
+        var first = gen.next();
+        if (first.done || !first.value || first.value.type !== 'header') {
           decodeStatus.textContent = 'Could not parse GIF frames.';
           btnDecode.disabled = false;
           btnCancel.classList.add('hidden');
           return;
         }
 
+        var screenW = first.value.width;
+        var screenH = first.value.height;
         var canvas = document.createElement('canvas');
-        canvas.width = result.width;
-        canvas.height = result.height;
+        canvas.width = screenW;
+        canvas.height = screenH;
         var ctx = canvas.getContext('2d', { willReadFrequently: true });
-        var prevData = ctx.createImageData(result.width, result.height);
+        var prevData = ctx.createImageData(screenW, screenH);
+        var frameCount = 0;
 
-        for (var f = 0; f < result.frames.length && !cancelling; f++) {
-          var frame = result.frames[f];
+        for (var step = gen.next(); !step.done && !cancelling; step = gen.next()) {
+          var frame = step.value;
+          frameCount++;
           ctx.putImageData(prevData, 0, 0);
           var frameImg = new ImageData(frame.rgba, frame.width, frame.height);
           ctx.putImageData(frameImg, frame.left, frame.top);
-          prevData = ctx.getImageData(0, 0, result.width, result.height);
-          var fullImg = ctx.getImageData(0, 0, result.width, result.height);
+          prevData = ctx.getImageData(0, 0, screenW, screenH);
+          var fullImg = ctx.getImageData(0, 0, screenW, screenH);
           var code = jsQR(fullImg.data, fullImg.width, fullImg.height, { inversionAttempts: 'attemptBoth' });
           if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
-          var pct = ((f + 1) / result.frames.length * 100).toFixed(0);
-          decodeProgress.style.width = pct + '%';
+
           var found = Object.keys(decodedChunks).length;
           var total = expectedTotal || '?';
-          decodeStatus.textContent = 'Scanned frame ' + (f + 1) + '/' + result.frames.length + ', found ' + found + '/' + total;
+          if (expectedTotal) decodeProgress.style.width = (found / expectedTotal * 100).toFixed(0) + '%';
+          decodeStatus.textContent = 'Scanned frame ' + frameCount + ', found ' + found + '/' + total;
+
+          if (frameCount % 20 === 0) {
+            await new Promise(function(r) { setTimeout(r, 0); });
+          }
+
           if (expectedTotal && found >= expectedTotal) break;
         }
 
