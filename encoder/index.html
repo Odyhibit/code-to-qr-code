@@ -192,7 +192,7 @@
 </head>
 <body>
   <h1>Code to QR — Encoder</h1>
-  <p class="subtitle">Convert any file into animated QR codes — now with compression and GIF export</p>
+  <p class="subtitle">Convert any file into animated QR codes — RGB tri-channel encoding, compression, and GIF export</p>
 
   <div class="card">
     <h2>1. Select Files</h2>
@@ -549,6 +549,11 @@
       return chunk && chunk.bytes instanceof Uint8Array ? chunk.bytes : JSON.stringify(chunk);
     }
 
+    // Overlays three independent QR codes into a single RGB image.
+    // Each channel is driven by its own QR's dark/light state, so every pixel
+    // is one of 8 pure colours (the corners of the RGB cube). A null channel
+    // contributes all-light (255) to that component, appearing as the
+    // complement of whichever other channels are active.
     function drawRgbQrToCanvas(cvs, dataG, dataR, dataB, fw, fh) {
       var qrG = qrcode(userQrVersion, userEcLevel);
       qrG.addData(dataG); qrG.make();
@@ -987,10 +992,13 @@
         writeString(buf, 'GIF89a');
         writeShort(buf, width);
         writeShort(buf, height);
+        // 0x82: GCT present, size field = 2 → 2^(2+1) = 8 colours. Background = 7 (white).
         writeByte(buf, 0x82);
         writeByte(buf, 7);
         writeByte(buf, 0);
 
+        // Palette index = R_light | (G_light << 1) | (B_light << 2)
+        // giving: 0=black 1=red 2=green 3=yellow 4=blue 5=magenta 6=cyan 7=white
         var gifPalette = [
           0,0,0,       255,0,0,   0,255,0,   255,255,0,
           0,0,255,     255,0,255, 0,255,255, 255,255,255
