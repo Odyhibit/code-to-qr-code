@@ -549,6 +549,38 @@
       return chunk && chunk.bytes instanceof Uint8Array ? chunk.bytes : JSON.stringify(chunk);
     }
 
+    function drawRgbQrToCanvas(cvs, dataG, dataR, dataB, fw, fh) {
+      var qrG = qrcode(userQrVersion, userEcLevel);
+      qrG.addData(dataG); qrG.make();
+      var qrR = null, qrB = null;
+      if (dataR) { qrR = qrcode(userQrVersion, userEcLevel); qrR.addData(dataR); qrR.make(); }
+      if (dataB) { qrB = qrcode(userQrVersion, userEcLevel); qrB.addData(dataB); qrB.make(); }
+
+      var moduleCount = qrG.getModuleCount();
+      var margin = 20;
+      var availSize = Math.min(fw, fh) - margin * 2;
+      var cellSize = Math.max(2, Math.floor(availSize / moduleCount));
+      var qrSize = cellSize * moduleCount;
+      var offsetX = Math.floor((fw - qrSize) / 2);
+      var offsetY = Math.floor((fh - qrSize) / 2);
+
+      cvs.width = fw; cvs.height = fh;
+      var ctx = cvs.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, fw, fh);
+
+      for (var row = 0; row < moduleCount; row++) {
+        for (var col = 0; col < moduleCount; col++) {
+          var r = (qrR && qrR.isDark(row, col)) ? 0 : 255;
+          var g = qrG.isDark(row, col) ? 0 : 255;
+          var b = (qrB && qrB.isDark(row, col)) ? 0 : 255;
+          if (r === 255 && g === 255 && b === 255) continue;
+          ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
+          ctx.fillRect(offsetX + col * cellSize, offsetY + row * cellSize, cellSize, cellSize);
+        }
+      }
+    }
+
     function calcFixedSize(chunksArr) {
       var modules = userQrVersion * 4 + 17;
       var cellSize = Math.max(4, Math.floor(400 / modules));
@@ -807,19 +839,27 @@
       startPlayback();
     }
 
-    function renderFrame(index) {
-      var chunk = chunks[index];
-      var payload = chunkPayload(chunk);
-      renderQrToCanvas(canvas, payload);
+    function getNumImages() { return Math.ceil(chunks.length / 3); }
 
-      var pct = ((index + 1) / chunks.length * 100).toFixed(0);
-      progressFill.style.width = pct + '%';
-      frameInfo.textContent = 'Frame ' + (index + 1) + ' / ' + chunks.length;
+    function renderFrame(imageIdx) {
+      var base = imageIdx * 3;
+      var dataG = chunkPayload(chunks[base]);
+      var dataR = chunks[base + 1] ? chunkPayload(chunks[base + 1]) : null;
+      var dataB = chunks[base + 2] ? chunkPayload(chunks[base + 2]) : null;
+      try {
+        drawRgbQrToCanvas(canvas, dataG, dataR, dataB, fixedSize.w, fixedSize.h);
+      } catch(err) {
+        renderCanvasMessage(canvas, 'Error: ' + (err.message || err));
+        return;
+      }
+      var numImages = getNumImages();
+      progressFill.style.width = ((imageIdx + 1) / numImages * 100).toFixed(0) + '%';
+      frameInfo.textContent = 'Image ' + (imageIdx + 1) + ' / ' + numImages + ' · ' + chunks.length + ' chunks';
     }
 
     function nextFrame() {
       currentFrame++;
-      if (currentFrame >= chunks.length) {
+      if (currentFrame >= getNumImages()) {
         currentFrame = 0;
         loopCount++;
         loopBadge.textContent = 'Loop ' + loopCount;
@@ -846,12 +886,12 @@
     btnPause.addEventListener('click', stopPlayback);
     btnNext.addEventListener('click', function() {
       stopPlayback();
-      currentFrame = (currentFrame + 1) % chunks.length;
+      currentFrame = (currentFrame + 1) % getNumImages();
       renderFrame(currentFrame);
     });
     btnPrev.addEventListener('click', function() {
       stopPlayback();
-      currentFrame = (currentFrame - 1 + chunks.length) % chunks.length;
+      currentFrame = (currentFrame - 1 + getNumImages()) % getNumImages();
       renderFrame(currentFrame);
     });
     btnReset.addEventListener('click', function() {
@@ -947,16 +987,15 @@
         writeString(buf, 'GIF89a');
         writeShort(buf, width);
         writeShort(buf, height);
-        writeByte(buf, 0x80);
-        writeByte(buf, 0);
+        writeByte(buf, 0x82);
+        writeByte(buf, 7);
         writeByte(buf, 0);
 
-        writeByte(buf, 0xff);
-        writeByte(buf, 0xff);
-        writeByte(buf, 0xff);
-        writeByte(buf, 0x00);
-        writeByte(buf, 0x00);
-        writeByte(buf, 0x00);
+        var gifPalette = [
+          0,0,0,       255,0,0,   0,255,0,   255,255,0,
+          0,0,255,     255,0,255, 0,255,255, 255,255,255
+        ];
+        for (var pc = 0; pc < gifPalette.length; pc++) writeByte(buf, gifPalette[pc]);
 
         writeByte(buf, 0x21);
         writeByte(buf, 0xff);
@@ -967,7 +1006,7 @@
         writeShort(buf, loops);
         writeByte(buf, 0);
 
-        var minCodeSize = 2;
+        var minCodeSize = 3;
 
         for (var f = 0; f < frames.length; f++) {
           var framePixels = frames[f];
@@ -1030,7 +1069,8 @@
 
       var loops = parseInt(gifLoopsInput.value) || 2;
       var delay = parseInt(gifDelayInput.value) || 400;
-      var totalFrames = chunks.length * loops;
+      var numImages = getNumImages();
+      var totalFrames = numImages * loops;
       var gw = fixedSize.w;
       var gh = fixedSize.h;
 
@@ -1042,10 +1082,13 @@
       var frames = [];
 
       for (var loop = 0; loop < loops; loop++) {
-        for (var i = 0; i < chunks.length; i++) {
-          var payload = chunkPayload(chunks[i]);
+        for (var i = 0; i < numImages; i++) {
+          var base = i * 3;
+          var dataG = chunkPayload(chunks[base]);
+          var dataR = chunks[base + 1] ? chunkPayload(chunks[base + 1]) : null;
+          var dataB = chunks[base + 2] ? chunkPayload(chunks[base + 2]) : null;
           try {
-            drawQrToCanvas(tempCanvas, payload, gw, gh);
+            drawRgbQrToCanvas(tempCanvas, dataG, dataR, dataB, gw, gh);
           } catch (err) {
             gifStatus.textContent = 'Error rendering frame ' + (i + 1) + ': ' + (err.message || err);
             btnGif.disabled = false;
@@ -1054,7 +1097,10 @@
           var imgData = ctx.getImageData(0, 0, gw, gh);
           var pixels = new Uint8Array(gw * gh);
           for (var p = 0; p < pixels.length; p++) {
-            pixels[p] = (imgData.data[p * 4] < 128) ? 1 : 0;
+            var ri = imgData.data[p * 4] >= 128 ? 1 : 0;
+            var gi = imgData.data[p * 4 + 1] >= 128 ? 1 : 0;
+            var bi = imgData.data[p * 4 + 2] >= 128 ? 1 : 0;
+            pixels[p] = ri | (gi << 1) | (bi << 2);
           }
           frames.push(pixels);
 
@@ -1125,7 +1171,8 @@
       var delay = parseInt(gifDelayInput.value) || 400;
       var gw = fixedSize.w;
       var gh = fixedSize.h;
-      var totalFrames = chunks.length * loops;
+      var numImages = getNumImages();
+      var totalFrames = numImages * loops;
 
       var recCanvas = document.createElement('canvas');
       recCanvas.width = gw;
@@ -1160,8 +1207,8 @@
 
       var frameQueue = [];
       for (var loop = 0; loop < loops; loop++) {
-        for (var i = 0; i < chunks.length; i++) {
-          frameQueue.push(chunks[i]);
+        for (var i = 0; i < numImages; i++) {
+          frameQueue.push(i);
         }
       }
 
@@ -1172,8 +1219,12 @@
           return;
         }
 
-        var payload = chunkPayload(frameQueue[qi]);
-        drawQrToCanvas(recCanvas, payload, gw, gh);
+        var imgIdx = frameQueue[qi];
+        var base = imgIdx * 3;
+        var dataG = chunkPayload(chunks[base]);
+        var dataR = chunks[base + 1] ? chunkPayload(chunks[base + 1]) : null;
+        var dataB = chunks[base + 2] ? chunkPayload(chunks[base + 2]) : null;
+        drawRgbQrToCanvas(recCanvas, dataG, dataR, dataB, gw, gh);
 
         if (track.requestFrame) {
           track.requestFrame();

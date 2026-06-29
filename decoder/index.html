@@ -380,6 +380,80 @@
       btnCameraStart.disabled = true;
     }
 
+    function extractChannelImageData(imageData, ch) {
+      var d = imageData.data, n = imageData.width * imageData.height;
+      var out = new Uint8ClampedArray(n * 4);
+      for (var i = 0; i < n; i++) {
+        var v = d[i * 4 + ch];
+        out[i * 4] = v; out[i * 4 + 1] = v; out[i * 4 + 2] = v; out[i * 4 + 3] = 255;
+      }
+      return new ImageData(out, imageData.width, imageData.height);
+    }
+
+    function cropToLocation(imageData, location, pad) {
+      var corners = [location.topLeftCorner, location.topRightCorner,
+                     location.bottomRightCorner, location.bottomLeftCorner];
+      var xs = corners.map(function(c) { return c.x; });
+      var ys = corners.map(function(c) { return c.y; });
+      var x0 = Math.max(0, Math.floor(Math.min.apply(null, xs)) - pad);
+      var y0 = Math.max(0, Math.floor(Math.min.apply(null, ys)) - pad);
+      var x1 = Math.min(imageData.width,  Math.ceil(Math.max.apply(null, xs)) + pad);
+      var y1 = Math.min(imageData.height, Math.ceil(Math.max.apply(null, ys)) + pad);
+      var cw = x1 - x0, ch = y1 - y0;
+      var src = imageData.data, out = new Uint8ClampedArray(cw * ch * 4);
+      for (var row = 0; row < ch; row++) {
+        for (var col = 0; col < cw; col++) {
+          var si = ((y0 + row) * imageData.width + (x0 + col)) * 4;
+          var di = (row * cw + col) * 4;
+          out[di] = src[si]; out[di+1] = src[si+1]; out[di+2] = src[si+2]; out[di+3] = 255;
+        }
+      }
+      return new ImageData(out, cw, ch);
+    }
+
+    function otsuNormalize(imageData, channel) {
+      var d = imageData.data, n = imageData.width * imageData.height;
+      var hist = new Int32Array(256);
+      for (var i = 0; i < n; i++) hist[d[i * 4 + channel]]++;
+
+      // Otsu threshold — finds the split that maximises inter-class variance
+      var sumAll = 0;
+      for (var v = 0; v < 256; v++) sumAll += v * hist[v];
+      var sumB = 0, wB = 0, maxVar = 0, thresh = 128;
+      for (var t = 0; t < 256; t++) {
+        wB += hist[t]; if (wB === 0) continue;
+        var wF = n - wB; if (wF === 0) break;
+        sumB += t * hist[t];
+        var mB = sumB / wB, mF = (sumAll - sumB) / wF;
+        var bvar = wB * wF * (mB - mF) * (mB - mF);
+        if (bvar > maxVar) { maxVar = bvar; thresh = t; }
+      }
+
+      // Mean of each cluster = "most common dark" and "most common light"
+      var darkSum = 0, darkCount = 0, lightSum = 0, lightCount = 0;
+      for (var v = 0; v < 256; v++) {
+        if (v <= thresh) { darkSum += v * hist[v]; darkCount += hist[v]; }
+        else             { lightSum += v * hist[v]; lightCount += hist[v]; }
+      }
+      var darkCenter  = darkCount  ? darkSum  / darkCount  : 0;
+      var lightCenter = lightCount ? lightSum / lightCount : 255;
+      var range = lightCenter - darkCenter || 1;
+
+      // Stretch so dark cluster → 0, light cluster → 255
+      var out = new Uint8ClampedArray(n * 4);
+      for (var i = 0; i < n; i++) {
+        var v = Math.min(255, Math.max(0, Math.round((d[i * 4 + channel] - darkCenter) * 255 / range)));
+        out[i*4] = v; out[i*4+1] = v; out[i*4+2] = v; out[i*4+3] = 255;
+      }
+      return new ImageData(out, imageData.width, imageData.height);
+    }
+
+    function scanChannelWithHint(imageData, channel, location) {
+      var crop = cropToLocation(imageData, location, 20);
+      var normalized = otsuNormalize(crop, channel);
+      return jsQR(normalized.data, normalized.width, normalized.height, { inversionAttempts: 'attemptBoth' });
+    }
+
     // ===================== CAMERA DECODE =====================
 
     var cameraStream = null;
@@ -519,10 +593,24 @@
       camScanCanvas.height = Math.round(vh * scale);
       camScanCtx.drawImage(cameraVideo, 0, 0, camScanCanvas.width, camScanCanvas.height);
       var imageData = camScanCtx.getImageData(0, 0, camScanCanvas.width, camScanCanvas.height);
-      var code = jsQR(imageData.data, imageData.width, imageData.height, {
-        inversionAttempts: 'attemptBoth'
+
+      // Green first — most reliable, gives us the QR location for free
+      var greenImg = extractChannelImageData(imageData, 1);
+      var greenCode = jsQR(greenImg.data, greenImg.width, greenImg.height, { inversionAttempts: 'attemptBoth' });
+      var loc = null;
+      if (greenCode) {
+        if (greenCode.data || greenCode.binaryData) camProcessQR(greenCode.data || '', greenCode.binaryData);
+        loc = greenCode.location;
+      }
+
+      // Red and blue: crop to known QR area + Otsu-normalize, fall back to full-frame scan
+      [0, 2].forEach(function(ch) {
+        var code = loc ? scanChannelWithHint(imageData, ch, loc) : (function() {
+          var chData = extractChannelImageData(imageData, ch);
+          return jsQR(chData.data, chData.width, chData.height, { inversionAttempts: 'attemptBoth' });
+        })();
+        if (code && (code.data || code.binaryData)) camProcessQR(code.data || '', code.binaryData);
       });
-      if (code && (code.data || code.binaryData)) camProcessQR(code.data || '', code.binaryData);
     }
 
     function camAfterScan() {
@@ -623,13 +711,13 @@
     function camInitGrid(total) {
       cameraChunkGrid.innerHTML = '';
       camGridCells = [];
-      for (var i = 0; i < total; i++) {
+      var numImages = Math.ceil(total / 3);
+      for (var i = 0; i < numImages; i++) {
         var cell = document.createElement('div');
-        var isParity = camRsEnabled && i >= camRsK;
-        cell.className = 'chunk-cell' + (isParity ? ' parity' : '');
+        cell.className = 'chunk-cell';
         cell.textContent = i;
-        cell.dataset.index = i;
-        cell.title = isParity ? 'Parity chunk' : 'Data chunk';
+        cell.dataset.imageIndex = i;
+        cell.title = 'Image ' + i + ' (chunks ' + (i*3) + '-' + Math.min(i*3+2, total-1) + ')';
         cameraChunkGrid.appendChild(cell);
         camGridCells.push(cell);
       }
@@ -637,11 +725,17 @@
 
     function camUpdateGrid() {
       var found = Object.keys(camDecodedChunks).length;
+      var total = camExpectedTotal;
       for (var i = 0; i < camGridCells.length; i++) {
-        camGridCells[i].className = 'chunk-cell' + (camDecodedChunks[i] !== undefined ? ' found' : '');
+        var base = i * 3;
+        var hasG = camDecodedChunks[base] !== undefined || (total !== null && base >= total);
+        var hasR = camDecodedChunks[base+1] !== undefined || (total !== null && base+1 >= total);
+        var hasB = camDecodedChunks[base+2] !== undefined || (total !== null && base+2 >= total);
+        camGridCells[i].style.background = 'rgb(' + (hasR?255:40) + ',' + (hasG?255:40) + ',' + (hasB?255:40) + ')';
+        camGridCells[i].style.color = (hasR && hasG && hasB) ? '#111' : '#cdd6f4';
       }
-      if (camExpectedTotal) {
-        cameraProgress.style.width = (found / camExpectedTotal * 100).toFixed(0) + '%';
+      if (total) {
+        cameraProgress.style.width = (found / total * 100).toFixed(0) + '%';
       }
     }
 
@@ -1297,8 +1391,20 @@
           ctx.putImageData(frameImg, frame.left, frame.top);
           prevData = ctx.getImageData(0, 0, screenW, screenH);
           var fullImg = ctx.getImageData(0, 0, screenW, screenH);
-          var code = jsQR(fullImg.data, fullImg.width, fullImg.height, { inversionAttempts: 'attemptBoth' });
-          if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
+          var gImg = extractChannelImageData(fullImg, 1);
+          var gCode = jsQR(gImg.data, gImg.width, gImg.height, { inversionAttempts: 'attemptBoth' });
+          var gifLoc = null;
+          if (gCode) {
+            if (gCode.data || gCode.binaryData) processQRData(gCode.data || '', gCode.binaryData);
+            gifLoc = gCode.location;
+          }
+          [0, 2].forEach(function(ch) {
+            var code = gifLoc ? scanChannelWithHint(fullImg, ch, gifLoc) : (function() {
+              var chImg = extractChannelImageData(fullImg, ch);
+              return jsQR(chImg.data, chImg.width, chImg.height, { inversionAttempts: 'attemptBoth' });
+            })();
+            if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
+          });
 
           var found = Object.keys(decodedChunks).length;
           var total = expectedTotal || '?';
@@ -1352,9 +1458,21 @@
         canvas.height = Math.min(vh, 960);
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
         framesScanned++;
-        if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
+        var vGImg = extractChannelImageData(imageData, 1);
+        var vGCode = jsQR(vGImg.data, vGImg.width, vGImg.height, { inversionAttempts: 'attemptBoth' });
+        var vidLoc = null;
+        if (vGCode) {
+          if (vGCode.data || vGCode.binaryData) processQRData(vGCode.data || '', vGCode.binaryData);
+          vidLoc = vGCode.location;
+        }
+        [0, 2].forEach(function(ch) {
+          var code = vidLoc ? scanChannelWithHint(imageData, ch, vidLoc) : (function() {
+            var chImg = extractChannelImageData(imageData, ch);
+            return jsQR(chImg.data, chImg.width, chImg.height, { inversionAttempts: 'attemptBoth' });
+          })();
+          if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
+        });
         var pct = Math.min((time / duration) * 100, 99);
         decodeProgress.style.width = pct + '%';
         var found = Object.keys(decodedChunks).length;
@@ -1424,13 +1542,13 @@
     function initChunkGrid(total) {
       chunkGrid.innerHTML = '';
       fileGridCells = [];
-      for (var i = 0; i < total; i++) {
+      var numImages = Math.ceil(total / 3);
+      for (var i = 0; i < numImages; i++) {
         var cell = document.createElement('div');
-        var isParity = rsEnabled && i >= rsK;
-        cell.className = 'chunk-cell' + (isParity ? ' parity' : '');
+        cell.className = 'chunk-cell';
         cell.textContent = i;
-        cell.dataset.index = i;
-        cell.title = isParity ? 'Parity chunk' : 'Data chunk';
+        cell.dataset.imageIndex = i;
+        cell.title = 'Image ' + i + ' (chunks ' + (i*3) + '-' + Math.min(i*3+2, total-1) + ')';
         chunkGrid.appendChild(cell);
         fileGridCells.push(cell);
       }
@@ -1439,8 +1557,14 @@
     function updateChunkGrid() {
       var found = Object.keys(decodedChunks).length;
       chunkInfo.textContent = found + ' / ' + expectedTotal;
+      var total = expectedTotal;
       for (var i = 0; i < fileGridCells.length; i++) {
-        fileGridCells[i].className = 'chunk-cell' + (decodedChunks[i] !== undefined ? ' found' : ' missing');
+        var base = i * 3;
+        var hasG = decodedChunks[base] !== undefined || (total !== null && base >= total);
+        var hasR = decodedChunks[base+1] !== undefined || (total !== null && base+1 >= total);
+        var hasB = decodedChunks[base+2] !== undefined || (total !== null && base+2 >= total);
+        fileGridCells[i].style.background = 'rgb(' + (hasR?255:40) + ',' + (hasG?255:40) + ',' + (hasB?255:40) + ')';
+        fileGridCells[i].style.color = (hasR && hasG && hasB) ? '#111' : '#cdd6f4';
       }
     }
 
