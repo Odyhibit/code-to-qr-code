@@ -132,7 +132,7 @@ describe('QR fixed mask generation', () => {
     const workerContext = {
       jsQR,
       importScripts: () => {},
-      self: { postMessage: message => { response = message; } },
+      self: { jsQR, postMessage: message => { response = message; } },
       Uint8ClampedArray,
       Uint32Array,
       Math,
@@ -140,6 +140,8 @@ describe('QR fixed mask generation', () => {
     };
     const workerCode = fs.readFileSync(path.join(__dirname, '..', 'decoder', 'qr-worker.js'), 'utf8');
     vm.runInNewContext(workerCode, workerContext);
+    assert.strictEqual(response.ready, true);
+    response = null;
     workerContext.self.onmessage({
       data: {
         id: 7,

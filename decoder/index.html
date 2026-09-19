@@ -607,6 +607,15 @@
     var camWorkerBusy = [];
     var camWorkerGeneration = 0;
     var camScanId = 0;
+    var camWorkerFallback = false;
+
+    function activateCameraWorkerFallback(reason) {
+      if (camWorkerFallback) return;
+      camWorkerFallback = true;
+      console.warn('QR worker unavailable; using main-thread decoder:', reason);
+      stopCameraWorkers();
+      if (cameraStream) cameraStatus.textContent = 'Camera active — compatibility decoder';
+    }
 
     function startCameraWorkers() {
       stopCameraWorkers();
@@ -618,9 +627,18 @@
           var worker = new Worker('qr-worker.js');
           worker.onmessage = function(event) {
             if (generation !== camWorkerGeneration) return;
-            camWorkerBusy[slot] = false;
             var message = event.data || {};
+            if (message.ready !== undefined) {
+              if (message.ready) camWorkerBusy[slot] = false;
+              else activateCameraWorkerFallback(message.startupError || 'worker startup failed');
+              return;
+            }
+            camWorkerBusy[slot] = false;
             if (message.generation !== generation) return;
+            if (message.error) {
+              activateCameraWorkerFallback(message.error);
+              return;
+            }
             var results = message.results || [];
             for (var r = 0; r < results.length; r++) {
               camProcessQR(results[r].data || '', results[r].binaryData);
@@ -629,11 +647,12 @@
           };
           worker.onerror = function(event) {
             if (generation !== camWorkerGeneration) return;
-            camWorkerBusy[slot] = false;
-            console.warn('QR decode worker error', event.message || event);
+            var detail = [event.message, event.filename,
+              event.lineno ? 'line ' + event.lineno : ''].filter(Boolean).join(' · ');
+            activateCameraWorkerFallback(detail || 'unknown worker loading error');
           };
           camWorkers.push(worker);
-          camWorkerBusy.push(false);
+          camWorkerBusy.push(true);
         })(i);
       }
     }
@@ -677,6 +696,7 @@
       camLastFpsTime = performance.now();
       camLastFpsCount = 0;
       camScanId = 0;
+      camWorkerFallback = false;
       startCameraWorkers();
 
       cameraChunkGrid.innerHTML = '';
@@ -755,6 +775,11 @@
       var vh = cameraVideo.videoHeight;
       if (vw === 0 || vh === 0) return;
 
+      if (camWorkerFallback) {
+        camScanJsQRFallback(vw, vh);
+        return;
+      }
+
       var slot = freeCameraWorker();
       if (slot === -1) return;
       camScanJsQR(vw, vh, slot);
@@ -779,6 +804,20 @@
         mode: getDecodeMode(),
         knownMono: camChunksPerImage === 1
       }, [imageData.data.buffer]);
+    }
+
+    function camScanJsQRFallback(vw, vh) {
+      var scale = Math.min(1, 800 / vw);
+      var scanWidth = Math.round(vw * scale);
+      var scanHeight = Math.round(vh * scale);
+      if (camScanCanvas.width !== scanWidth) camScanCanvas.width = scanWidth;
+      if (camScanCanvas.height !== scanHeight) camScanCanvas.height = scanHeight;
+      camScanCtx.drawImage(cameraVideo, 0, 0, camScanCanvas.width, camScanCanvas.height);
+      var imageData = camScanCtx.getImageData(0, 0, camScanCanvas.width, camScanCanvas.height);
+      camFrameCount++;
+      scanRgbFrame(imageData, camProcessQR, camDecodedChunks, camExpectedTotal,
+        camChunksPerImage === 1);
+      camAfterScan();
     }
 
     function camAfterScan() {
