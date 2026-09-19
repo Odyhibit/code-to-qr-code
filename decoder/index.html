@@ -268,10 +268,12 @@
       <div class="camera-overlay">
         <span class="badge" id="camera-scanner-badge">jsQR</span>
         <span class="badge" id="camera-fps-badge">-- fps</span>
+        <span class="badge" id="camera-qr-rate-badge">-- qr/s</span>
         <span class="badge" id="camera-chunks-badge">0 chunks</span>
       </div>
     </div>
     <div class="status-text hidden" id="camera-status">Starting camera...</div>
+    <div class="status-text hidden" id="camera-diagnostics"></div>
     <div class="chunk-grid hidden" id="camera-chunk-grid"></div>
     <div class="progress-bar hidden"><div class="progress-fill" id="camera-progress"></div></div>
     <div class="preview-section hidden" id="camera-preview-section">
@@ -341,11 +343,13 @@
     var cameraChunkGrid = document.getElementById('camera-chunk-grid');
     var cameraProgress = document.getElementById('camera-progress');
     var cameraFpsBadge = document.getElementById('camera-fps-badge');
+    var cameraQrRateBadge = document.getElementById('camera-qr-rate-badge');
     var cameraChunksBadge = document.getElementById('camera-chunks-badge');
     var cameraScannerBadge = document.getElementById('camera-scanner-badge');
     var cameraPreviewSection = document.getElementById('camera-preview-section');
     var cameraPreviewBadge = document.getElementById('camera-preview-badge');
     var cameraPreviewCode = document.getElementById('camera-preview-code');
+    var cameraDiagnostics = document.getElementById('camera-diagnostics');
     var decodeModeSelect = document.getElementById('decode-mode');
 
     var dropZone = document.getElementById('drop-zone');
@@ -608,12 +612,22 @@
     var camWorkerGeneration = 0;
     var camScanId = 0;
     var camWorkerFallback = false;
+    var camCompletedCount = 0;
+    var camBusyDropCount = 0;
+    var camValidQrCount = 0;
+    var camScanStarted = {};
+    var camLatencyTotal = 0;
+    var camLatencyMax = 0;
+    var camChannelHits = { direct: 0, green: 0, red: 0, blue: 0 };
+    var camLastStats = null;
 
     function activateCameraWorkerFallback(reason) {
       if (camWorkerFallback) return;
       camWorkerFallback = true;
       console.warn('QR worker unavailable; using main-thread decoder:', reason);
       stopCameraWorkers();
+      camScanStarted = {};
+      cameraScannerBadge.textContent = 'jsQR · main';
       if (cameraStream) cameraStatus.textContent = 'Camera active — compatibility decoder';
     }
 
@@ -629,19 +643,32 @@
             if (generation !== camWorkerGeneration) return;
             var message = event.data || {};
             if (message.ready !== undefined) {
-              if (message.ready) camWorkerBusy[slot] = false;
+              if (message.ready) {
+                camWorkerBusy[slot] = false;
+                cameraScannerBadge.textContent = 'jsQR · ' + camWorkers.length + ' workers';
+              }
               else activateCameraWorkerFallback(message.startupError || 'worker startup failed');
               return;
             }
             camWorkerBusy[slot] = false;
             if (message.generation !== generation) return;
+            camCompletedCount++;
+            var startedAt = camScanStarted[message.id];
+            delete camScanStarted[message.id];
+            if (startedAt !== undefined) {
+              var latency = performance.now() - startedAt;
+              camLatencyTotal += latency;
+              camLatencyMax = Math.max(camLatencyMax, latency);
+            }
             if (message.error) {
               activateCameraWorkerFallback(message.error);
               return;
             }
             var results = message.results || [];
             for (var r = 0; r < results.length; r++) {
-              camProcessQR(results[r].data || '', results[r].binaryData);
+              var channel = results[r].channel || 'direct';
+              if (camChannelHits[channel] !== undefined) camChannelHits[channel]++;
+              if (camProcessQR(results[r].data || '', results[r].binaryData)) camValidQrCount++;
             }
             camAfterScan();
           };
@@ -697,6 +724,14 @@
       camLastFpsCount = 0;
       camScanId = 0;
       camWorkerFallback = false;
+      camCompletedCount = 0;
+      camBusyDropCount = 0;
+      camValidQrCount = 0;
+      camScanStarted = {};
+      camLatencyTotal = 0;
+      camLatencyMax = 0;
+      camChannelHits = { direct: 0, green: 0, red: 0, blue: 0 };
+      camLastStats = { time: camLastFpsTime, submitted: 0, completed: 0, dropped: 0, valid: 0 };
       startCameraWorkers();
 
       cameraChunkGrid.innerHTML = '';
@@ -706,10 +741,15 @@
       cameraPreviewSection.classList.add('hidden');
       cameraFpsBadge.textContent = '-- fps';
       cameraFpsBadge.className = 'badge';
+      cameraQrRateBadge.textContent = '-- qr/s';
+      cameraQrRateBadge.className = 'badge';
+      cameraScannerBadge.textContent = 'jsQR · starting';
       cameraChunksBadge.textContent = '0 chunks';
       cameraChunksBadge.className = 'badge';
       cameraPreviewBadge.textContent = 'scanning...';
       cameraPreviewBadge.className = 'badge badge-info';
+      cameraDiagnostics.textContent = '';
+      cameraDiagnostics.classList.remove('hidden');
 
       navigator.mediaDevices.getUserMedia({
         video: { facingMode: camFacingMode, width: { ideal: 1280 }, height: { ideal: 720 } }
@@ -749,6 +789,7 @@
       }
       cameraVideo.srcObject = null;
       cameraContainer.classList.add('hidden');
+      cameraDiagnostics.classList.add('hidden');
       btnCameraStart.classList.remove('hidden');
       btnCameraStop.classList.add('hidden');
       btnCameraSwitch.classList.add('hidden');
@@ -781,7 +822,10 @@
       }
 
       var slot = freeCameraWorker();
-      if (slot === -1) return;
+      if (slot === -1) {
+        camBusyDropCount++;
+        return;
+      }
       camScanJsQR(vw, vh, slot);
     }
 
@@ -795,8 +839,10 @@
       var imageData = camScanCtx.getImageData(0, 0, camScanCanvas.width, camScanCanvas.height);
       camWorkerBusy[workerSlot] = true;
       camFrameCount++;
+      var scanId = ++camScanId;
+      camScanStarted[scanId] = performance.now();
       camWorkers[workerSlot].postMessage({
-        id: ++camScanId,
+        id: scanId,
         generation: camWorkerGeneration,
         buffer: imageData.data.buffer,
         width: imageData.width,
@@ -814,17 +860,44 @@
       if (camScanCanvas.height !== scanHeight) camScanCanvas.height = scanHeight;
       camScanCtx.drawImage(cameraVideo, 0, 0, camScanCanvas.width, camScanCanvas.height);
       var imageData = camScanCtx.getImageData(0, 0, camScanCanvas.width, camScanCanvas.height);
+      var startedAt = performance.now();
       camFrameCount++;
-      scanRgbFrame(imageData, camProcessQR, camDecodedChunks, camExpectedTotal,
-        camChunksPerImage === 1);
+      scanRgbFrame(imageData, function(data, binaryData) {
+        var frame = camProcessQR(data, binaryData);
+        if (frame) camValidQrCount++;
+        return frame;
+      }, camDecodedChunks, camExpectedTotal, camChunksPerImage === 1);
+      camCompletedCount++;
+      var latency = performance.now() - startedAt;
+      camLatencyTotal += latency;
+      camLatencyMax = Math.max(camLatencyMax, latency);
       camAfterScan();
     }
 
     function camAfterScan() {
       var now = performance.now();
       if (now - camLastFpsTime >= 1000) {
-        var fps = Math.round((camFrameCount - camLastFpsCount) * 1000 / (now - camLastFpsTime));
-        cameraFpsBadge.textContent = fps + ' fps';
+        var elapsed = (now - camLastStats.time) / 1000;
+        var submitRate = (camFrameCount - camLastStats.submitted) / elapsed;
+        var scanRate = (camCompletedCount - camLastStats.completed) / elapsed;
+        var dropRate = (camBusyDropCount - camLastStats.dropped) / elapsed;
+        var validRate = (camValidQrCount - camLastStats.valid) / elapsed;
+        var averageLatency = camCompletedCount ? camLatencyTotal / camCompletedCount : 0;
+        cameraFpsBadge.textContent = scanRate.toFixed(1) + ' scan/s';
+        cameraQrRateBadge.textContent = validRate.toFixed(1) + ' qr/s';
+        cameraDiagnostics.textContent = 'submit ' + submitRate.toFixed(1) + '/s · scan ' +
+          scanRate.toFixed(1) + '/s · valid ' + validRate.toFixed(1) + '/s · busy drops ' +
+          dropRate.toFixed(1) + '/s · latency ' + averageLatency.toFixed(0) + ' ms avg';
+        cameraDiagnostics.title = 'Max latency ' + camLatencyMax.toFixed(0) + ' ms · channel hits: direct ' +
+          camChannelHits.direct + ', green ' + camChannelHits.green + ', red ' +
+          camChannelHits.red + ', blue ' + camChannelHits.blue;
+        camLastStats = {
+          time: now,
+          submitted: camFrameCount,
+          completed: camCompletedCount,
+          dropped: camBusyDropCount,
+          valid: camValidQrCount
+        };
         camLastFpsTime = now;
         camLastFpsCount = camFrameCount;
       }
