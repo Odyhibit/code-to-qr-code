@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const vm = require('vm');
+const qrcodeFactory = require('../encoder/qrcode.js');
+const jsQR = require('../decoder/jsQR.min.js');
 
 const rsPath = path.join(__dirname, '..', 'shared', 'reedsolomon.js');
 const rsCode = fs.readFileSync(rsPath, 'utf8');
@@ -42,6 +44,123 @@ function simpleHash(bytes) {
   }
   return (h >>> 0).toString(16).padStart(8, '0');
 }
+
+describe('QR fixed mask generation', () => {
+  function makeFixedQr(payload) {
+    const qr = qrcodeFactory(10, 'M');
+    qr.addData(payload);
+    qr.make(4);
+    return qr;
+  }
+
+  function rasterizeChannels(qrs, scale = 5, margin = 4) {
+    const modules = qrs[0].getModuleCount();
+    const size = (modules + margin * 2) * scale;
+    const rgba = new Uint8ClampedArray(size * size * 4);
+    rgba.fill(255);
+    for (let row = 0; row < modules; row++) {
+      for (let col = 0; col < modules; col++) {
+        for (let y = 0; y < scale; y++) {
+          for (let x = 0; x < scale; x++) {
+            const pixel = (((row + margin) * scale + y) * size + (col + margin) * scale + x) * 4;
+            for (let channel = 0; channel < 3; channel++) {
+              rgba[pixel + channel] = qrs[channel].isDark(row, col) ? 0 : 255;
+            }
+            rgba[pixel + 3] = 255;
+          }
+        }
+      }
+    }
+    return { rgba, size };
+  }
+
+  function extractChannel(rgba, channel) {
+    const mono = new Uint8ClampedArray(rgba.length);
+    for (let pixel = 0; pixel < rgba.length; pixel += 4) {
+      const value = rgba[pixel + channel];
+      mono[pixel] = value;
+      mono[pixel + 1] = value;
+      mono[pixel + 2] = value;
+      mono[pixel + 3] = 255;
+    }
+    return mono;
+  }
+
+  it('supports an explicitly selected standards-compliant mask', () => {
+    const qr = qrcodeFactory(10, 'M');
+    qr.addData('fixed-mask-test');
+    qr.make(4);
+    assert.strictEqual(qr.getModuleCount(), 57);
+  });
+
+  it('still selects a mask automatically when none is supplied', () => {
+    const qr = qrcodeFactory(10, 'M');
+    qr.addData('automatic-mask-test');
+    qr.make();
+    assert.strictEqual(qr.getModuleCount(), 57);
+  });
+
+  it('rejects invalid explicit masks', () => {
+    const qr = qrcodeFactory(10, 'M');
+    qr.addData('invalid-mask-test');
+    assert.throws(() => qr.make(8), /bad maskPattern/);
+  });
+
+  it('round-trips all three fixed-mask RGB channels through jsQR', () => {
+    const payloads = ['red channel payload', 'green channel payload', 'blue channel payload'];
+    const { rgba, size } = rasterizeChannels(payloads.map(makeFixedQr));
+    const decoded = payloads.map((_, channel) => {
+      const result = jsQR(extractChannel(rgba, channel), size, size, { inversionAttempts: 'attemptBoth' });
+      return result && result.data;
+    });
+    assert.deepStrictEqual(decoded, payloads);
+  });
+
+  it('round-trips a fixed-mask monochrome raster through jsQR', () => {
+    const payload = 'monochrome fixed-mask payload';
+    const qr = makeFixedQr(payload);
+    const { rgba, size } = rasterizeChannels([qr, qr, qr]);
+    const decoded = jsQR(rgba, size, size, { inversionAttempts: 'attemptBoth' });
+    assert.ok(decoded);
+    assert.strictEqual(decoded.data, payload);
+  });
+
+  it('decodes RGB camera frames through the worker entry point', () => {
+    const payloads = ['worker red', 'worker green', 'worker blue'];
+    const { rgba, size } = rasterizeChannels(payloads.map(makeFixedQr));
+    let response = null;
+    const workerContext = {
+      jsQR,
+      importScripts: () => {},
+      self: { postMessage: message => { response = message; } },
+      Uint8ClampedArray,
+      Uint32Array,
+      Math,
+      isFinite
+    };
+    const workerCode = fs.readFileSync(path.join(__dirname, '..', 'decoder', 'qr-worker.js'), 'utf8');
+    vm.runInNewContext(workerCode, workerContext);
+    workerContext.self.onmessage({
+      data: {
+        id: 7,
+        generation: 3,
+        buffer: rgba.buffer,
+        width: size,
+        height: size,
+        mode: 'color',
+        knownMono: false
+      }
+    });
+
+    assert.ok(response);
+    assert.strictEqual(response.id, 7);
+    assert.strictEqual(response.generation, 3);
+    const byChannel = Object.fromEntries(response.results.map(result => [result.channel, result.data]));
+    assert.strictEqual(byChannel.red, payloads[0]);
+    assert.strictEqual(byChannel.green, payloads[1]);
+    assert.strictEqual(byChannel.blue, payloads[2]);
+  });
+});
 
 describe('GF(256) arithmetic', () => {
   it('mul(a,0) = 0', () => {
@@ -328,6 +447,27 @@ describe('Protocol v3 binary framing', () => {
     assert.strictEqual(assembled.meta.hash, 'a1b2c3d4');
     assert.deepStrictEqual(Buffer.from(assembled.bytes), Buffer.from(data));
   });
+
+  it('preserves monochrome transfer flag on every v3 frame', () => {
+    const data = Buffer.from('black and white transfer mode');
+    const frames = QrProtocolV3.buildFrames(data, {
+      name: 'mono.txt',
+      hash: '01020304',
+      originalSize: data.length,
+      chunkBodySize: 10,
+      gz: false,
+      zip: false,
+      mono: true,
+      rsParity: 2
+    });
+
+    assert.ok(frames.length > 1);
+    frames.forEach(frame => {
+      assert.strictEqual(frame.mono, true);
+      const parsed = QrProtocolV3.decodeFrame(frame.bytes);
+      assert.strictEqual(parsed.mono, true);
+    });
+  });
 });
 
 describe('bytesToBase64', () => {
@@ -570,7 +710,7 @@ describe('Server path traversal protection', () => {
 
 describe('GIF parser bounds checking', () => {
   const gifParserCode = fs.readFileSync(path.join(__dirname, '..', 'decoder', 'index.html'), 'utf8');
-  const match = gifParserCode.match(/var GifParser = \(function\(\) \{([\s\S]*?)return \{ parseFrames: parseFrames \};\n\s*\}\)\(\);/);
+  const match = gifParserCode.match(/var GifParser = \(function\(\) \{([\s\S]*?)return \{ parseFrames: parseFrames(?:, parseFramesGen: parseFramesGen)? \};\n\s*\}\)\(\);/);
   assert.ok(match, 'GifParser not found in decoder');
   const GifParser = vm.runInThisContext('(function() { ' + match[1] + '; return { parseFrames: parseFrames }; })()');
 

@@ -7,6 +7,7 @@ export interface QrFrameV3 {
   zip: boolean;
   rs: boolean;
   parity: boolean;
+  mono?: boolean;
   body: Uint8Array;
 }
 

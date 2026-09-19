@@ -56,7 +56,7 @@ function generateCert() {
   var ips = getLocalIPs();
   console.log('Generating self-signed cert for:', ips.join(', '));
 
-  var { execSync } = require('child_process');
+  var { execFileSync } = require('child_process');
   var cnfPath = path.join(DIR, '_openssl.cnf');
   var certPath = path.join(DIR, 'cert.pem');
   var keyPath = path.join(DIR, 'key.pem');

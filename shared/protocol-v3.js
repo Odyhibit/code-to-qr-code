@@ -5,6 +5,7 @@ var QrProtocolV3 = (function() {
   var FLAG_ZIP = 1 << 1;
   var FLAG_RS = 1 << 2;
   var FLAG_PARITY = 1 << 3;
+  var FLAG_MONO = 1 << 4;
 
   function writeVarint(out, value) {
     value = Number(value);
@@ -101,6 +102,7 @@ var QrProtocolV3 = (function() {
     if (frame.zip) flags |= FLAG_ZIP;
     if (frame.rs) flags |= FLAG_RS;
     if (frame.parity) flags |= FLAG_PARITY;
+    if (frame.mono) flags |= FLAG_MONO;
 
     var out = [MAGIC_0, MAGIC_1, flags];
     writeVarint(out, frame.i);
@@ -128,6 +130,7 @@ var QrProtocolV3 = (function() {
       zip: (flags & FLAG_ZIP) !== 0,
       rs: (flags & FLAG_RS) !== 0,
       parity: (flags & FLAG_PARITY) !== 0,
+      mono: (flags & FLAG_MONO) !== 0,
       body: body
     };
     if (i === 0 && !frame.parity) frame.meta = parseMetadataBody(body);
@@ -172,10 +175,10 @@ var QrProtocolV3 = (function() {
     var total = dataBodies.length + parityBodies.length;
     var frames = [];
     for (var i = 0; i < dataBodies.length; i++) {
-      frames.push({ v: 3, i: i, n: total, k: dataBodies.length, gz: options.gz, zip: options.zip, rs: parityBodies.length > 0, parity: false, body: dataBodies[i] });
+      frames.push({ v: 3, i: i, n: total, k: dataBodies.length, gz: options.gz, zip: options.zip, rs: parityBodies.length > 0, parity: false, mono: options.mono === true, body: dataBodies[i] });
     }
     for (var p = 0; p < parityBodies.length; p++) {
-      frames.push({ v: 3, i: dataBodies.length + p, n: total, k: dataBodies.length, gz: options.gz, zip: options.zip, rs: true, parity: true, body: parityBodies[p] });
+      frames.push({ v: 3, i: dataBodies.length + p, n: total, k: dataBodies.length, gz: options.gz, zip: options.zip, rs: true, parity: true, mono: options.mono === true, body: parityBodies[p] });
     }
     return frames.map(function(frame) {
       var bytes = encodeFrame(frame);
@@ -218,6 +221,7 @@ var QrProtocolV3 = (function() {
     FLAG_ZIP: FLAG_ZIP,
     FLAG_RS: FLAG_RS,
     FLAG_PARITY: FLAG_PARITY,
+    FLAG_MONO: FLAG_MONO,
     stringToBytes: stringToBytes,
     encodeFrame: encodeFrame,
     decodeFrame: decodeFrame,

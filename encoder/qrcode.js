@@ -421,7 +421,7 @@ var qrcode = function() {
       return _moduleCount;
     };
 
-    _this.make = function() {
+    _this.make = function(maskPattern) {
       if (_typeNumber < 1) {
         var typeNumber = 1;
 
@@ -449,7 +449,13 @@ var qrcode = function() {
         _typeNumber = typeNumber;
       }
 
-      makeImpl(false, getBestMaskPattern() );
+      if (typeof maskPattern == 'undefined') {
+        maskPattern = getBestMaskPattern();
+      } else if (maskPattern !== Math.floor(maskPattern) || maskPattern < 0 || maskPattern > 7) {
+        throw 'bad maskPattern:' + maskPattern;
+      }
+
+      makeImpl(false, maskPattern);
     };
 
     _this.createTableTag = function(cellSize, margin) {

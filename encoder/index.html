@@ -233,9 +233,26 @@
     <div class="hidden" id="density-section" style="margin-top:12px;">
       <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:0.9em;">Profile:</label>
+          <select id="transfer-profile" style="padding:4px 8px;font-size:0.85em;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;">
+            <option value="balanced" selected>Balanced</option>
+            <option value="reliable-camera">Reliable camera</option>
+            <option value="fast-camera">Fast camera</option>
+            <option value="file-export">File export</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:0.9em;">Mode:</label>
+          <select id="qr-color-mode" style="padding:4px 8px;font-size:0.85em;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;">
+            <option value="color" selected>Color RGB</option>
+            <option value="bw">Black &amp; white</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
           <label style="font-size:0.9em;">QR version:</label>
-          <input type="range" id="qr-version-slider" min="1" max="40" step="1" value="17" style="width:120px;">
-          <span id="qr-version-val" style="font-size:0.85em;min-width:95px;">v17 · 85x85</span>
+          <input type="range" id="qr-version-slider" min="1" max="40" step="1" value="20" style="width:120px;">
+          <span id="qr-version-val" style="font-size:0.85em;min-width:95px;">v20 · 97x97</span>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <label style="font-size:0.9em;">Error correction:</label>
@@ -343,11 +360,18 @@
     var fps = 3;
     var loopCount = 1;
     var playTimer = null;
+    var playbackPumpTimer = null;
+    var playbackGeneration = 0;
+    var playbackFrameQueue = [];
+    var nextFrameAt = 0;
+    var FRAME_LOOKAHEAD = 3;
     var effectiveChunkSize = 500;
     var fixedSize = { w: 440, h: 440 };
-    var rsParity = 0;
+    var rsParity = 2;
 
     var densitySection = document.getElementById('density-section');
+    var transferProfileSelect = document.getElementById('transfer-profile');
+    var qrColorModeSelect = document.getElementById('qr-color-mode');
     var qrVersionSlider = document.getElementById('qr-version-slider');
     var qrVersionVal = document.getElementById('qr-version-val');
     var ecLevelSelect = document.getElementById('ec-level');
@@ -355,6 +379,15 @@
     var encoderError = document.getElementById('encoder-error');
     var userQrVersion = 20;
     var userEcLevel = 'M';
+    var transferProfile = 'balanced';
+    var qrColorMode = 'color';
+
+    var TRANSFER_PROFILES = {
+      'balanced': { version: 20, ec: 'M', fps: 3, parity: 2, delay: 400 },
+      'reliable-camera': { version: 16, ec: 'Q', fps: 3, parity: 5, delay: 500 },
+      'fast-camera': { version: 18, ec: 'M', fps: 6, parity: 5, delay: 250 },
+      'file-export': { version: 30, ec: 'L', fps: 10, parity: 2, delay: 120 }
+    };
 
     var QR_BYTE_CAPACITY = {
       L: [0,17,32,53,78,106,134,154,192,230,271,321,367,425,458,520,586,644,718,792,858,929,1003,1091,1171,1273,1367,1465,1528,1628,1732,1840,1952,2068,2188,2303,2431,2563,2699,2809,2953],
@@ -368,6 +401,21 @@
       qrVersionVal.textContent = 'v' + userQrVersion + ' · ' + modules + 'x' + modules;
     }
     updateQrVersionLabel();
+
+    function markCustomProfile() {
+      if (transferProfileSelect.value !== 'custom') {
+        transferProfileSelect.value = 'custom';
+        transferProfile = 'custom';
+      }
+    }
+
+    function getChunksPerImage() {
+      return qrColorMode === 'color' ? 3 : 1;
+    }
+
+    function getModeLabel() {
+      return qrColorMode === 'color' ? 'Color RGB' : 'Black & white';
+    }
 
     function showEncoderError(message) {
       encoderError.textContent = message;
@@ -390,13 +438,44 @@
       rsOverhead.textContent = n === 0 ? 'no recovery' : 'recover up to ' + n + ' missing chunks';
     }
 
-    btnRsOff.addEventListener('click', function() { setRsParity(0); reEncode(); });
-    btnRs2.addEventListener('click', function() { setRsParity(2); reEncode(); });
-    btnRs5.addEventListener('click', function() { setRsParity(5); reEncode(); });
-    btnRs10.addEventListener('click', function() { setRsParity(10); reEncode(); });
+    function applyTransferProfile(name) {
+      var profile = TRANSFER_PROFILES[name];
+      if (!profile) return;
+      stopPlayback();
+      transferProfile = name;
+      userQrVersion = profile.version;
+      userEcLevel = profile.ec;
+      fps = profile.fps;
+      qrVersionSlider.value = userQrVersion;
+      ecLevelSelect.value = userEcLevel;
+      fpsSlider.value = fps;
+      fpsVal.textContent = fps;
+      gifDelayInput.value = profile.delay;
+      setRsParity(profile.parity);
+      updateQrVersionLabel();
+      updateDensityInfo();
+      reEncode();
+    }
+
+    transferProfileSelect.addEventListener('change', function() {
+      applyTransferProfile(transferProfileSelect.value);
+    });
+
+    qrColorModeSelect.addEventListener('change', function() {
+      stopPlayback();
+      qrColorMode = qrColorModeSelect.value;
+      updateDensityInfo();
+      reEncode();
+    });
+
+    btnRsOff.addEventListener('click', function() { markCustomProfile(); setRsParity(0); reEncode(); });
+    btnRs2.addEventListener('click', function() { markCustomProfile(); setRsParity(2); reEncode(); });
+    btnRs5.addEventListener('click', function() { markCustomProfile(); setRsParity(5); reEncode(); });
+    btnRs10.addEventListener('click', function() { markCustomProfile(); setRsParity(10); reEncode(); });
 
     qrVersionSlider.addEventListener('input', function() {
       stopPlayback();
+      markCustomProfile();
       userQrVersion = parseInt(qrVersionSlider.value);
       updateQrVersionLabel();
       updateDensityInfo();
@@ -405,6 +484,7 @@
       reEncode();
     });
     ecLevelSelect.addEventListener('change', function() {
+      markCustomProfile();
       userEcLevel = ecLevelSelect.value;
       updateDensityInfo();
       reEncode();
@@ -428,6 +508,7 @@
           chunkBodySize: mid,
           gz: options.gz,
           zip: options.zip,
+          mono: options.mono,
           rsParity: options.rsParity
         });
         var fits = true;
@@ -452,7 +533,7 @@
       var capacity = getSelectedQrCapacity();
       var modules = userQrVersion * 4 + 17;
       if (!lastRawBytes) {
-        densityInfo.textContent = 'capacity ' + capacity + ' bytes/frame · ' + modules + 'x' + modules + ' modules';
+        densityInfo.textContent = 'capacity ' + capacity + ' bytes/frame · ' + modules + 'x' + modules + ' modules · ' + getModeLabel();
         densityInfo.className = 'badge badge-info';
         return;
       }
@@ -463,6 +544,7 @@
         originalSize: lastRawBytes.length,
         gz: info.useCompressed,
         zip: lastIsZip,
+        mono: qrColorMode === 'bw',
         rsParity: rsParity
       }, capacity);
       if (!built.frames) {
@@ -471,7 +553,8 @@
         return;
       }
       var cellSize = Math.floor(400 / modules);
-      densityInfo.textContent = built.frames.length + ' chunks · ' + built.bodySize + ' body bytes/frame · capacity ' + capacity + ' · ' + modules + 'x' + modules + ' modules';
+      var imageCount = Math.ceil(built.frames.length / getChunksPerImage());
+      densityInfo.textContent = imageCount + ' images · ' + built.frames.length + ' chunks · ' + built.bodySize + ' body bytes/frame · ' + getModeLabel();
       densityInfo.className = 'badge ' + (cellSize >= 5 ? 'badge-success' : cellSize >= 3 ? 'badge-info' : 'badge-error');
     }
 
@@ -513,12 +596,36 @@
       return btoa(str);
     }
 
-    function drawQrToCanvas(cvs, data, fixedWidth, fixedHeight) {
-      var qr = qrcode(userQrVersion, userEcLevel);
-      qr.addData(data);
-      qr.make();
+    var QR_MASK_PATTERN = 4;
+    var qrRasterCanvas = document.createElement('canvas');
+    var qrRasterCtx = qrRasterCanvas.getContext('2d');
+    var qrRasterPixels = null;
 
-      var moduleCount = qr.getModuleCount();
+    function ensureCanvasSize(cvs, width, height) {
+      if (cvs.width !== width) cvs.width = width;
+      if (cvs.height !== height) cvs.height = height;
+    }
+
+    function drawQrRaster(cvs, qrG, qrR, qrB, fixedWidth, fixedHeight) {
+      var moduleCount = qrG.getModuleCount();
+      var pixelLength = moduleCount * moduleCount * 4;
+      if (!qrRasterPixels || qrRasterPixels.length !== pixelLength) {
+        qrRasterPixels = new Uint8ClampedArray(pixelLength);
+      }
+      var pixels = qrRasterPixels;
+      var p = 0;
+      for (var row = 0; row < moduleCount; row++) {
+        for (var col = 0; col < moduleCount; col++) {
+          pixels[p++] = qrR && qrR.isDark(row, col) ? 0 : 255;
+          pixels[p++] = qrG.isDark(row, col) ? 0 : 255;
+          pixels[p++] = qrB && qrB.isDark(row, col) ? 0 : 255;
+          pixels[p++] = 255;
+        }
+      }
+
+      ensureCanvasSize(qrRasterCanvas, moduleCount, moduleCount);
+      qrRasterCtx.putImageData(new ImageData(pixels, moduleCount, moduleCount), 0, 0);
+
       var fw = fixedWidth || 440;
       var fh = fixedHeight || 440;
       var margin = 20;
@@ -528,21 +635,20 @@
       var offsetX = Math.floor((fw - qrSize) / 2);
       var offsetY = Math.floor((fh - qrSize) / 2);
 
-      cvs.width = fw;
-      cvs.height = fh;
-
+      ensureCanvasSize(cvs, fw, fh);
       var ctx = cvs.getContext('2d');
       ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, cvs.width, cvs.height);
+      ctx.fillRect(0, 0, fw, fh);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(qrRasterCanvas, 0, 0, moduleCount, moduleCount,
+        offsetX, offsetY, qrSize, qrSize);
+    }
 
-      for (var row = 0; row < moduleCount; row++) {
-        for (var col = 0; col < moduleCount; col++) {
-          if (qr.isDark(row, col)) {
-            ctx.fillStyle = '#000000';
-            ctx.fillRect(offsetX + col * cellSize, offsetY + row * cellSize, cellSize, cellSize);
-          }
-        }
-      }
+    function drawQrToCanvas(cvs, data, fixedWidth, fixedHeight) {
+      var qr = qrcode(userQrVersion, userEcLevel);
+      qr.addData(data);
+      qr.make(QR_MASK_PATTERN);
+      drawQrRaster(cvs, qr, qr, qr, fixedWidth, fixedHeight);
     }
 
     function chunkPayload(chunk) {
@@ -556,34 +662,11 @@
     // complement of whichever other channels are active.
     function drawRgbQrToCanvas(cvs, dataG, dataR, dataB, fw, fh) {
       var qrG = qrcode(userQrVersion, userEcLevel);
-      qrG.addData(dataG); qrG.make();
+      qrG.addData(dataG); qrG.make(QR_MASK_PATTERN);
       var qrR = null, qrB = null;
-      if (dataR) { qrR = qrcode(userQrVersion, userEcLevel); qrR.addData(dataR); qrR.make(); }
-      if (dataB) { qrB = qrcode(userQrVersion, userEcLevel); qrB.addData(dataB); qrB.make(); }
-
-      var moduleCount = qrG.getModuleCount();
-      var margin = 20;
-      var availSize = Math.min(fw, fh) - margin * 2;
-      var cellSize = Math.max(2, Math.floor(availSize / moduleCount));
-      var qrSize = cellSize * moduleCount;
-      var offsetX = Math.floor((fw - qrSize) / 2);
-      var offsetY = Math.floor((fh - qrSize) / 2);
-
-      cvs.width = fw; cvs.height = fh;
-      var ctx = cvs.getContext('2d');
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, fw, fh);
-
-      for (var row = 0; row < moduleCount; row++) {
-        for (var col = 0; col < moduleCount; col++) {
-          var r = (qrR && qrR.isDark(row, col)) ? 0 : 255;
-          var g = qrG.isDark(row, col) ? 0 : 255;
-          var b = (qrB && qrB.isDark(row, col)) ? 0 : 255;
-          if (r === 255 && g === 255 && b === 255) continue;
-          ctx.fillStyle = 'rgb(' + r + ',' + g + ',' + b + ')';
-          ctx.fillRect(offsetX + col * cellSize, offsetY + row * cellSize, cellSize, cellSize);
-        }
-      }
+      if (dataR) { qrR = qrcode(userQrVersion, userEcLevel); qrR.addData(dataR); qrR.make(QR_MASK_PATTERN); }
+      if (dataB) { qrB = qrcode(userQrVersion, userEcLevel); qrB.addData(dataB); qrB.make(QR_MASK_PATTERN); }
+      drawQrRaster(cvs, qrG, qrR, qrB, fw, fh);
     }
 
     function calcFixedSize(chunksArr) {
@@ -782,6 +865,7 @@
         originalSize: rawBytes.length,
         gz: compressionFlag === 1,
         zip: isZip ? true : false,
+        mono: qrColorMode === 'bw',
         rsParity: rsParity
       }, capacity);
       chunks = built.frames || [];
@@ -805,7 +889,7 @@
       }
 
       fileMeta.classList.remove('hidden');
-      fileMeta.innerHTML = '<strong>' + escapeHtml(displayName) + '</strong> &middot; ' + formatSize(rawBytes.length) + ' &middot; ' + chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '') + ' &middot; Hash: <span style="font-size:1em;color:var(--accent)">' + hash + '</span>';
+      fileMeta.innerHTML = '<strong>' + escapeHtml(displayName) + '</strong> &middot; ' + formatSize(rawBytes.length) + ' &middot; ' + getNumImages() + ' image' + (getNumImages() !== 1 ? 's' : '') + ' &middot; ' + chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '') + ' &middot; Hash: <span style="font-size:1em;color:var(--accent)">' + hash + '</span>';
 
       if (useCompressed) {
         compStats.classList.remove('hidden');
@@ -828,6 +912,7 @@
       encodeCard.classList.remove('hidden');
       var metaParts = [
         'Binary payload: ' + formatSize(dataToEncode.length),
+        getModeLabel(),
         'QR v' + userQrVersion + '-' + userEcLevel,
         'capacity: ' + capacity + ' bytes/frame',
         'body: ' + effectiveChunkSize + ' bytes/frame'
@@ -844,32 +929,111 @@
       startPlayback();
     }
 
-    function getNumImages() { return Math.ceil(chunks.length / 3); }
+    function getNumImages() { return Math.ceil(chunks.length / getChunksPerImage()); }
+
+    function getFramePayloads(imageIdx) {
+      var base = imageIdx * getChunksPerImage();
+      return {
+        g: chunkPayload(chunks[base]),
+        r: qrColorMode === 'color' && chunks[base + 1] ? chunkPayload(chunks[base + 1]) : null,
+        b: qrColorMode === 'color' && chunks[base + 2] ? chunkPayload(chunks[base + 2]) : null
+      };
+    }
+
+    function drawCurrentModeFrame(cvs, imageIdx, width, height) {
+      var payloads = getFramePayloads(imageIdx);
+      if (qrColorMode === 'color') {
+        drawRgbQrToCanvas(cvs, payloads.g, payloads.r, payloads.b, width, height);
+      } else {
+        drawQrToCanvas(cvs, payloads.g, width, height);
+      }
+    }
+
+    function updateFrameUi(imageIdx) {
+      var numImages = getNumImages();
+      progressFill.style.width = ((imageIdx + 1) / numImages * 100).toFixed(0) + '%';
+      frameInfo.textContent = 'Image ' + (imageIdx + 1) + ' / ' + numImages + ' · ' + chunks.length + ' chunks · ' + getModeLabel();
+    }
 
     function renderFrame(imageIdx) {
-      var base = imageIdx * 3;
-      var dataG = chunkPayload(chunks[base]);
-      var dataR = chunks[base + 1] ? chunkPayload(chunks[base + 1]) : null;
-      var dataB = chunks[base + 2] ? chunkPayload(chunks[base + 2]) : null;
       try {
-        drawRgbQrToCanvas(canvas, dataG, dataR, dataB, fixedSize.w, fixedSize.h);
+        drawCurrentModeFrame(canvas, imageIdx, fixedSize.w, fixedSize.h);
       } catch(err) {
         renderCanvasMessage(canvas, 'Error: ' + (err.message || err));
         return;
       }
-      var numImages = getNumImages();
-      progressFill.style.width = ((imageIdx + 1) / numImages * 100).toFixed(0) + '%';
-      frameInfo.textContent = 'Image ' + (imageIdx + 1) + ' / ' + numImages + ' · ' + chunks.length + ' chunks';
+      updateFrameUi(imageIdx);
     }
 
-    function nextFrame() {
-      currentFrame++;
-      if (currentFrame >= getNumImages()) {
-        currentFrame = 0;
+    function makePreparedFrame(imageIdx) {
+      var prepared = document.createElement('canvas');
+      drawCurrentModeFrame(prepared, imageIdx, fixedSize.w, fixedSize.h);
+      return { index: imageIdx, canvas: prepared };
+    }
+
+    function nextQueuedIndex() {
+      var lastIndex = playbackFrameQueue.length
+        ? playbackFrameQueue[playbackFrameQueue.length - 1].index
+        : currentFrame;
+      return (lastIndex + 1) % getNumImages();
+    }
+
+    function pumpPlaybackQueue(generation) {
+      if (!playing || generation !== playbackGeneration) return;
+      try {
+        // Rendering happens ahead of playback, so the animation callback only
+        // has to copy an already-complete image onto the visible canvas.
+        while (playbackFrameQueue.length < FRAME_LOOKAHEAD) {
+          var imageIdx = nextQueuedIndex();
+          playbackFrameQueue.push(makePreparedFrame(imageIdx));
+        }
+      } catch (err) {
+        stopPlayback();
+        renderCanvasMessage(canvas, 'Error: ' + (err.message || err));
+      }
+    }
+
+    function schedulePlaybackPump() {
+      if (playbackPumpTimer !== null) return;
+      var generation = playbackGeneration;
+      playbackPumpTimer = setTimeout(function() {
+        playbackPumpTimer = null;
+        pumpPlaybackQueue(generation);
+      }, 0);
+    }
+
+    function paintPreparedFrame(prepared) {
+      ensureCanvasSize(canvas, fixedSize.w, fixedSize.h);
+      var ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(prepared.canvas, 0, 0);
+      updateFrameUi(prepared.index);
+    }
+
+    function playbackTick(now) {
+      if (!playing) return;
+      playTimer = requestAnimationFrame(playbackTick);
+      if (now < nextFrameAt) return;
+
+      var prepared = playbackFrameQueue.shift();
+      if (!prepared) {
+        nextFrameAt = now + 1000 / fps;
+        schedulePlaybackPump();
+        return;
+      }
+
+      var previousFrame = currentFrame;
+      currentFrame = prepared.index;
+      if (previousFrame === getNumImages() - 1 && currentFrame === 0) {
         loopCount++;
         loopBadge.textContent = 'Loop ' + loopCount;
       }
-      renderFrame(currentFrame);
+      paintPreparedFrame(prepared);
+      nextFrameAt += 1000 / fps;
+      // Do not burst through overdue frames after a throttled/backgrounded
+      // callback. Every QR must remain visible for a complete frame interval.
+      if (now >= nextFrameAt) nextFrameAt = now + 1000 / fps;
+      schedulePlaybackPump();
     }
 
     function startPlayback() {
@@ -877,14 +1041,21 @@
       playing = true;
       btnPlay.disabled = true;
       btnPause.disabled = false;
-      playTimer = setInterval(nextFrame, 1000 / fps);
+      playbackGeneration++;
+      playbackFrameQueue = [];
+      pumpPlaybackQueue(playbackGeneration);
+      nextFrameAt = performance.now() + 1000 / fps;
+      playTimer = requestAnimationFrame(playbackTick);
     }
 
     function stopPlayback() {
       playing = false;
       btnPlay.disabled = false;
       btnPause.disabled = true;
-      if (playTimer) { clearInterval(playTimer); playTimer = null; }
+      playbackGeneration++;
+      playbackFrameQueue = [];
+      if (playTimer !== null) { cancelAnimationFrame(playTimer); playTimer = null; }
+      if (playbackPumpTimer !== null) { clearTimeout(playbackPumpTimer); playbackPumpTimer = null; }
     }
 
     btnPlay.addEventListener('click', startPlayback);
@@ -907,11 +1078,11 @@
       renderFrame(0);
     });
     fpsSlider.addEventListener('input', function(e) {
+      markCustomProfile();
       fps = parseInt(e.target.value);
       fpsVal.textContent = fps;
       if (playing) {
-        clearInterval(playTimer);
-        playTimer = setInterval(nextFrame, 1000 / fps);
+        nextFrameAt = performance.now() + 1000 / fps;
       }
     });
 
@@ -1091,12 +1262,8 @@
 
       for (var loop = 0; loop < loops; loop++) {
         for (var i = 0; i < numImages; i++) {
-          var base = i * 3;
-          var dataG = chunkPayload(chunks[base]);
-          var dataR = chunks[base + 1] ? chunkPayload(chunks[base + 1]) : null;
-          var dataB = chunks[base + 2] ? chunkPayload(chunks[base + 2]) : null;
           try {
-            drawRgbQrToCanvas(tempCanvas, dataG, dataR, dataB, gw, gh);
+            drawCurrentModeFrame(tempCanvas, i, gw, gh);
           } catch (err) {
             gifStatus.textContent = 'Error rendering frame ' + (i + 1) + ': ' + (err.message || err);
             btnGif.disabled = false;
@@ -1129,7 +1296,7 @@
         var a = document.createElement('a');
         a.href = url;
         var baseName = chunks[0].name || 'file';
-        a.download = baseName + '.qr.gif';
+        a.download = baseName + (qrColorMode === 'color' ? '.qr.color.gif' : '.qr.bw.gif');
         a.click();
         URL.revokeObjectURL(url);
 
@@ -1202,7 +1369,7 @@
         var a = document.createElement('a');
         a.href = url;
         var baseName = chunks[0].name || 'file';
-        a.download = baseName + '.qr.' + ext;
+        a.download = baseName + (qrColorMode === 'color' ? '.qr.color.' : '.qr.bw.') + ext;
         a.click();
         URL.revokeObjectURL(url);
 
@@ -1228,11 +1395,7 @@
         }
 
         var imgIdx = frameQueue[qi];
-        var base = imgIdx * 3;
-        var dataG = chunkPayload(chunks[base]);
-        var dataR = chunks[base + 1] ? chunkPayload(chunks[base + 1]) : null;
-        var dataB = chunks[base + 2] ? chunkPayload(chunks[base + 2]) : null;
-        drawRgbQrToCanvas(recCanvas, dataG, dataR, dataB, gw, gh);
+        drawCurrentModeFrame(recCanvas, imgIdx, gw, gh);
 
         if (track.requestFrame) {
           track.requestFrame();

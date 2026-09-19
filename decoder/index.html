@@ -249,6 +249,14 @@
   <div class="card" id="camera-card">
     <h2>Decode with Camera</h2>
     <p class="card-desc">Point your camera at animated QR codes to decode in real-time.</p>
+    <div style="display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;margin-bottom:12px;">
+      <label style="font-size:0.9em;color:var(--text-dim);">Mode:</label>
+      <select id="decode-mode" style="padding:6px 10px;font-size:0.9em;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:4px;">
+        <option value="auto" selected>Auto</option>
+        <option value="bw">Black & white</option>
+        <option value="color">Color RGB</option>
+      </select>
+    </div>
     <div class="actions">
       <button id="btn-camera-start">Start Camera</button>
       <button id="btn-camera-switch" class="secondary hidden">Switch Camera</button>
@@ -338,6 +346,7 @@
     var cameraPreviewSection = document.getElementById('camera-preview-section');
     var cameraPreviewBadge = document.getElementById('camera-preview-badge');
     var cameraPreviewCode = document.getElementById('camera-preview-code');
+    var decodeModeSelect = document.getElementById('decode-mode');
 
     var dropZone = document.getElementById('drop-zone');
     var fileInput = document.getElementById('file-input');
@@ -378,6 +387,37 @@
         cameraWarning.style.color = 'var(--error)';
       }
       btnCameraStart.disabled = true;
+    }
+
+    function simpleHash(bytes) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < bytes.length; i++) {
+        h ^= bytes[i];
+        h = Math.imul(h, 0x01000193);
+      }
+      return (h >>> 0).toString(16).padStart(8, '0');
+    }
+
+    function verifyDecodedBytes(bytes, expectedHashValue, complete) {
+      if (!complete) {
+        resultBadge.textContent = 'INCOMPLETE';
+        resultBadge.className = 'badge badge-error';
+        return { ok: false, actual: null };
+      }
+      if (!expectedHashValue) {
+        resultBadge.textContent = 'COMPLETE';
+        resultBadge.className = 'badge badge-warning';
+        return { ok: true, actual: null };
+      }
+      var actual = simpleHash(bytes);
+      if (actual !== String(expectedHashValue).toLowerCase()) {
+        resultBadge.textContent = 'HASH MISMATCH';
+        resultBadge.className = 'badge badge-error';
+        return { ok: false, actual: actual };
+      }
+      resultBadge.textContent = 'VERIFIED';
+      resultBadge.className = 'badge badge-success';
+      return { ok: true, actual: actual };
     }
 
     function extractChannelImageData(imageData, ch) {
@@ -449,9 +489,97 @@
     }
 
     function scanChannelWithHint(imageData, channel, location) {
+      var rectified = rectifyChannelToLocation(imageData, channel, location);
+      if (rectified) {
+        var rectCode = jsQR(rectified.data, rectified.width, rectified.height, { inversionAttempts: 'attemptBoth' });
+        if (rectCode) return rectCode;
+      }
       var crop = cropToLocation(imageData, location, 20);
       var normalized = otsuNormalize(crop, channel);
       return jsQR(normalized.data, normalized.width, normalized.height, { inversionAttempts: 'attemptBoth' });
+    }
+
+    function dist(a, b) {
+      var dx = a.x - b.x, dy = a.y - b.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function rectifyChannelToLocation(imageData, channel, location) {
+      if (!location) return null;
+      var tl = location.topLeftCorner, tr = location.topRightCorner;
+      var br = location.bottomRightCorner, bl = location.bottomLeftCorner;
+      var edge = Math.max(dist(tl, tr), dist(tr, br), dist(br, bl), dist(bl, tl));
+      var size = Math.max(120, Math.min(700, Math.round(edge)));
+      if (!isFinite(size) || size <= 0) return null;
+
+      var src = imageData.data;
+      var out = new Uint8ClampedArray(size * size * 4);
+      for (var y = 0; y < size; y++) {
+        var v = size === 1 ? 0 : y / (size - 1);
+        for (var x = 0; x < size; x++) {
+          var u = size === 1 ? 0 : x / (size - 1);
+          var sx = (1 - u) * (1 - v) * tl.x + u * (1 - v) * tr.x + u * v * br.x + (1 - u) * v * bl.x;
+          var sy = (1 - u) * (1 - v) * tl.y + u * (1 - v) * tr.y + u * v * br.y + (1 - u) * v * bl.y;
+          sx = Math.max(0, Math.min(imageData.width - 1, Math.round(sx)));
+          sy = Math.max(0, Math.min(imageData.height - 1, Math.round(sy)));
+          var si = (sy * imageData.width + sx) * 4;
+          var di = (y * size + x) * 4;
+          var val = src[si + channel];
+          out[di] = val; out[di + 1] = val; out[di + 2] = val; out[di + 3] = 255;
+        }
+      }
+      return otsuNormalize(new ImageData(out, size, size), 0);
+    }
+
+    function decodedChunkExists(chunkMap, index, total) {
+      return (typeof total === 'number' && index >= total) || chunkMap[index] !== undefined;
+    }
+
+    function getDecodeMode() {
+      return decodeModeSelect ? decodeModeSelect.value : 'auto';
+    }
+
+    function isMonoDecodeMode() {
+      return getDecodeMode() === 'bw';
+    }
+
+    function scanRgbFrame(imageData, processFn, chunkMap, expectedTotalValue, knownMono) {
+      var mode = getDecodeMode();
+      var useFullImageOnly = knownMono || mode === 'bw';
+      if (mode !== 'color') {
+        var directCode = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+        if (directCode && (directCode.data || directCode.binaryData)) {
+          var directInfo = processFn(directCode.data || '', directCode.binaryData);
+          if (useFullImageOnly || (directInfo && directInfo.mono)) return;
+        }
+      }
+      if (useFullImageOnly) return;
+
+      var greenImg = extractChannelImageData(imageData, 1);
+      var greenCode = jsQR(greenImg.data, greenImg.width, greenImg.height, { inversionAttempts: 'attemptBoth' });
+      var loc = null;
+      var frameInfo = null;
+      if (greenCode) {
+        frameInfo = processFn(greenCode.data || '', greenCode.binaryData);
+        loc = greenCode.location;
+      }
+      if (frameInfo && frameInfo.mono) return;
+
+      var base = frameInfo && typeof frameInfo.i === 'number' ? Math.floor(frameInfo.i / 3) * 3 : null;
+      var channels = [0, 2];
+      for (var ci = 0; ci < channels.length; ci++) {
+        var ch = channels[ci];
+        var logicalIndex = base === null ? null : base + (ch === 0 ? 1 : 2);
+        if (logicalIndex !== null && decodedChunkExists(chunkMap, logicalIndex, expectedTotalValue)) continue;
+        var code = loc ? scanChannelWithHint(imageData, ch, loc) : (function() {
+          var chData = extractChannelImageData(imageData, ch);
+          return jsQR(chData.data, chData.width, chData.height, { inversionAttempts: 'attemptBoth' });
+        })();
+        if (code && (code.data || code.binaryData)) {
+          var nextInfo = processFn(code.data || '', code.binaryData);
+          if (nextInfo && nextInfo.mono) break;
+        }
+      }
     }
 
     // ===================== CAMERA DECODE =====================
@@ -468,13 +596,61 @@
     var camRsEnabled = false;
     var camRsK = 0;
     var camProtocolVersion = 2;
+    var camChunksPerImage = 3;
     var camFacingMode = 'environment';
     var camFrameCount = 0;
     var camLastFpsTime = 0;
     var camLastFpsCount = 0;
-    var camScanning = false;
     var camScanCanvas = document.createElement('canvas');
     var camScanCtx = camScanCanvas.getContext('2d', { willReadFrequently: true });
+    var camWorkers = [];
+    var camWorkerBusy = [];
+    var camWorkerGeneration = 0;
+    var camScanId = 0;
+
+    function startCameraWorkers() {
+      stopCameraWorkers();
+      camWorkerGeneration++;
+      var generation = camWorkerGeneration;
+      var workerCount = Math.min(2, Math.max(1, navigator.hardwareConcurrency || 1));
+      for (var i = 0; i < workerCount; i++) {
+        (function(slot) {
+          var worker = new Worker('qr-worker.js');
+          worker.onmessage = function(event) {
+            if (generation !== camWorkerGeneration) return;
+            camWorkerBusy[slot] = false;
+            var message = event.data || {};
+            if (message.generation !== generation) return;
+            var results = message.results || [];
+            for (var r = 0; r < results.length; r++) {
+              camProcessQR(results[r].data || '', results[r].binaryData);
+            }
+            camAfterScan();
+          };
+          worker.onerror = function(event) {
+            if (generation !== camWorkerGeneration) return;
+            camWorkerBusy[slot] = false;
+            console.warn('QR decode worker error', event.message || event);
+          };
+          camWorkers.push(worker);
+          camWorkerBusy.push(false);
+        })(i);
+      }
+    }
+
+    function stopCameraWorkers() {
+      camWorkerGeneration++;
+      for (var i = 0; i < camWorkers.length; i++) camWorkers[i].terminate();
+      camWorkers = [];
+      camWorkerBusy = [];
+    }
+
+    function freeCameraWorker() {
+      for (var i = 0; i < camWorkerBusy.length; i++) {
+        if (!camWorkerBusy[i]) return i;
+      }
+      return -1;
+    }
 
     btnCameraStart.addEventListener('click', startCamera);
     btnCameraStop.addEventListener('click', stopCamera);
@@ -484,7 +660,7 @@
     });
 
     function startCamera() {
-      stopCamera();
+      stopCamera(true);
 
       camDecodedChunks = {};
       camExpectedTotal = null;
@@ -496,9 +672,12 @@
       camRsEnabled = false;
       camRsK = 0;
       camProtocolVersion = 2;
+      camChunksPerImage = isMonoDecodeMode() ? 1 : 3;
       camFrameCount = 0;
       camLastFpsTime = performance.now();
       camLastFpsCount = 0;
+      camScanId = 0;
+      startCameraWorkers();
 
       cameraChunkGrid.innerHTML = '';
       cameraChunkGrid.classList.add('hidden');
@@ -538,12 +717,12 @@
       });
     }
 
-    function stopCamera() {
+    function stopCamera(suppressFinish) {
       if (cameraAnimFrame) {
         cancelAnimationFrame(cameraAnimFrame);
         cameraAnimFrame = null;
       }
-      camScanning = false;
+      stopCameraWorkers();
       if (cameraStream) {
         cameraStream.getTracks().forEach(function(t) { t.stop(); });
         cameraStream = null;
@@ -553,6 +732,8 @@
       btnCameraStart.classList.remove('hidden');
       btnCameraStop.classList.add('hidden');
       btnCameraSwitch.classList.add('hidden');
+
+      if (suppressFinish) return;
 
       if (camExpectedTotal && Object.keys(camDecodedChunks).length >= camExpectedTotal) {
         cameraStatus.textContent = 'All chunks captured!';
@@ -568,54 +749,39 @@
     function camScanLoop() {
       if (!cameraStream) return;
 
+      cameraAnimFrame = requestAnimationFrame(camScanLoop);
+
       var vw = cameraVideo.videoWidth;
       var vh = cameraVideo.videoHeight;
-      if (vw === 0 || vh === 0) {
-        cameraAnimFrame = requestAnimationFrame(camScanLoop);
-        return;
-      }
+      if (vw === 0 || vh === 0) return;
 
-      if (camScanning) {
-        cameraAnimFrame = requestAnimationFrame(camScanLoop);
-        return;
-      }
-
-      camScanning = true;
-
-      camFrameCount++;
-      camScanJsQR(vw, vh);
-      camAfterScan();
+      var slot = freeCameraWorker();
+      if (slot === -1) return;
+      camScanJsQR(vw, vh, slot);
     }
 
-    function camScanJsQR(vw, vh) {
+    function camScanJsQR(vw, vh, workerSlot) {
       var scale = Math.min(1, 800 / vw);
-      camScanCanvas.width = Math.round(vw * scale);
-      camScanCanvas.height = Math.round(vh * scale);
+      var scanWidth = Math.round(vw * scale);
+      var scanHeight = Math.round(vh * scale);
+      if (camScanCanvas.width !== scanWidth) camScanCanvas.width = scanWidth;
+      if (camScanCanvas.height !== scanHeight) camScanCanvas.height = scanHeight;
       camScanCtx.drawImage(cameraVideo, 0, 0, camScanCanvas.width, camScanCanvas.height);
       var imageData = camScanCtx.getImageData(0, 0, camScanCanvas.width, camScanCanvas.height);
-
-      // Green first — most reliable, gives us the QR location for free
-      var greenImg = extractChannelImageData(imageData, 1);
-      var greenCode = jsQR(greenImg.data, greenImg.width, greenImg.height, { inversionAttempts: 'attemptBoth' });
-      var loc = null;
-      if (greenCode) {
-        if (greenCode.data || greenCode.binaryData) camProcessQR(greenCode.data || '', greenCode.binaryData);
-        loc = greenCode.location;
-      }
-
-      // Red and blue: crop to known QR area + Otsu-normalize, fall back to full-frame scan
-      [0, 2].forEach(function(ch) {
-        var code = loc ? scanChannelWithHint(imageData, ch, loc) : (function() {
-          var chData = extractChannelImageData(imageData, ch);
-          return jsQR(chData.data, chData.width, chData.height, { inversionAttempts: 'attemptBoth' });
-        })();
-        if (code && (code.data || code.binaryData)) camProcessQR(code.data || '', code.binaryData);
-      });
+      camWorkerBusy[workerSlot] = true;
+      camFrameCount++;
+      camWorkers[workerSlot].postMessage({
+        id: ++camScanId,
+        generation: camWorkerGeneration,
+        buffer: imageData.data.buffer,
+        width: imageData.width,
+        height: imageData.height,
+        mode: getDecodeMode(),
+        knownMono: camChunksPerImage === 1
+      }, [imageData.data.buffer]);
     }
 
     function camAfterScan() {
-      camScanning = false;
-
       var now = performance.now();
       if (now - camLastFpsTime >= 1000) {
         var fps = Math.round((camFrameCount - camLastFpsCount) * 1000 / (now - camLastFpsTime));
@@ -628,18 +794,17 @@
         var found = Object.keys(camDecodedChunks).length;
         cameraChunksBadge.textContent = found + '/' + camExpectedTotal + ' chunks';
         if (found >= camExpectedTotal) {
-          stopCamera();
+          stopCamera(true);
           camFinishDecode(true);
           return;
         }
         if (camRsEnabled && found >= camRsK) {
-          stopCamera();
+          stopCamera(true);
           camFinishDecode(false);
           return;
         }
       }
 
-      if (cameraStream) cameraAnimFrame = requestAnimationFrame(camScanLoop);
     }
 
     function camProcessQR(data, binaryData) {
@@ -656,12 +821,13 @@
             camIsZipped = v3Frame.zip;
             camRsEnabled = v3Frame.rs;
             camRsK = v3Frame.k;
+            camChunksPerImage = (isMonoDecodeMode() || v3Frame.mono) ? 1 : 3;
             if (v3Frame.meta) {
               camExpectedHash = v3Frame.meta.hash;
               camFileName = v3Frame.meta.name;
               camOriginalSize = v3Frame.meta.originalSize;
             }
-            camInitGrid(camExpectedTotal);
+            camInitGrid(camExpectedTotal, camChunksPerImage);
           } else if (v3Frame.meta) {
             camExpectedHash = v3Frame.meta.hash;
             camFileName = v3Frame.meta.name;
@@ -675,7 +841,7 @@
             void cameraContainer.offsetWidth;
             cameraContainer.classList.add('flash');
           }
-          return;
+          return { i: v3Frame.i, n: v3Frame.n, v: 3, mono: isMonoDecodeMode() || v3Frame.mono };
         }
 
         var chunk = JSON.parse(data);
@@ -692,7 +858,8 @@
             camIsZipped = chunk.zip === 1;
             camRsEnabled = chunk.rs === 1;
             camRsK = chunk.k || chunk.n;
-            camInitGrid(camExpectedTotal);
+            camChunksPerImage = isMonoDecodeMode() ? 1 : 3;
+            camInitGrid(camExpectedTotal, camChunksPerImage);
           }
           camUpdateGrid();
           camUpdatePreview();
@@ -702,22 +869,25 @@
             void cameraContainer.offsetWidth;
             cameraContainer.classList.add('flash');
           }
+          return { i: chunk.i, n: chunk.n, v: chunk.v };
         }
       } catch (e) { console.warn('camProcessQR: invalid QR data', e); }
+      return null;
     }
 
     var camGridCells = [];
 
-    function camInitGrid(total) {
+    function camInitGrid(total, chunksPerImage) {
       cameraChunkGrid.innerHTML = '';
       camGridCells = [];
-      var numImages = Math.ceil(total / 3);
+      var perImage = chunksPerImage || 3;
+      var numImages = Math.ceil(total / perImage);
       for (var i = 0; i < numImages; i++) {
         var cell = document.createElement('div');
         cell.className = 'chunk-cell';
         cell.textContent = i;
         cell.dataset.imageIndex = i;
-        cell.title = 'Image ' + i + ' (chunks ' + (i*3) + '-' + Math.min(i*3+2, total-1) + ')';
+        cell.title = 'Image ' + i + ' (chunks ' + (i * perImage) + '-' + Math.min(i * perImage + perImage - 1, total - 1) + ')';
         cameraChunkGrid.appendChild(cell);
         camGridCells.push(cell);
       }
@@ -727,12 +897,18 @@
       var found = Object.keys(camDecodedChunks).length;
       var total = camExpectedTotal;
       for (var i = 0; i < camGridCells.length; i++) {
-        var base = i * 3;
-        var hasG = camDecodedChunks[base] !== undefined || (total !== null && base >= total);
-        var hasR = camDecodedChunks[base+1] !== undefined || (total !== null && base+1 >= total);
-        var hasB = camDecodedChunks[base+2] !== undefined || (total !== null && base+2 >= total);
-        camGridCells[i].style.background = 'rgb(' + (hasR?255:40) + ',' + (hasG?255:40) + ',' + (hasB?255:40) + ')';
-        camGridCells[i].style.color = (hasR && hasG && hasB) ? '#111' : '#cdd6f4';
+        var base = i * camChunksPerImage;
+        if (camChunksPerImage === 1) {
+          var hasChunk = camDecodedChunks[base] !== undefined || (total !== null && base >= total);
+          camGridCells[i].style.background = hasChunk ? 'var(--success)' : 'var(--border)';
+          camGridCells[i].style.color = hasChunk ? '#111' : '#cdd6f4';
+        } else {
+          var hasG = camDecodedChunks[base] !== undefined || (total !== null && base >= total);
+          var hasR = camDecodedChunks[base+1] !== undefined || (total !== null && base+1 >= total);
+          var hasB = camDecodedChunks[base+2] !== undefined || (total !== null && base+2 >= total);
+          camGridCells[i].style.background = 'rgb(' + (hasR?255:40) + ',' + (hasG?255:40) + ',' + (hasB?255:40) + ')';
+          camGridCells[i].style.color = (hasR && hasG && hasB) ? '#111' : '#cdd6f4';
+        }
       }
       if (total) {
         cameraProgress.style.width = (found / total * 100).toFixed(0) + '%';
@@ -880,13 +1056,10 @@
         if (camIsGzipped) metaHtml += '<span class="badge badge-info">gzip</span>';
         if (camIsZipped) metaHtml += '<span class="badge badge-info">zip archive</span>';
         if (!allFound && complete) metaHtml += '<span class="badge badge-comp">RS recovered</span>';
+        var verification = verifyDecodedBytes(bytes, camExpectedHash, complete);
+        if (verification.actual && verification.actual !== String(camExpectedHash).toLowerCase()) metaHtml += '<span class="badge badge-error">got ' + verification.actual + '</span>';
 
         resultMeta.innerHTML = metaHtml;
-
-        if (complete) {
-          resultBadge.textContent = 'VERIFIED';
-          resultBadge.className = 'badge badge-success';
-        }
 
         if (camIsZipped) {
           resultCode.textContent = '[' + formatSize(bytes.length) + ' ZIP archive — see files below]';
@@ -947,9 +1120,9 @@
         if (camIsGzipped) metaHtml += '<span class="badge badge-info">gzip</span>';
         if (camIsZipped) metaHtml += '<span class="badge badge-info">zip archive</span>';
         if (!allFound && assembled.recovered) metaHtml += '<span class="badge badge-comp">RS recovered</span>';
+        var verification = verifyDecodedBytes(bytes, camExpectedHash, true);
+        if (verification.actual && verification.actual !== String(camExpectedHash).toLowerCase()) metaHtml += '<span class="badge badge-error">got ' + verification.actual + '</span>';
         resultMeta.innerHTML = metaHtml;
-        resultBadge.textContent = 'VERIFIED';
-        resultBadge.className = 'badge badge-success';
 
         if (camIsZipped) {
           resultCode.textContent = '[' + formatSize(bytes.length) + ' ZIP archive — see files below]';
@@ -1095,6 +1268,7 @@
     var rsEnabled = false;
     var rsK = 0;
     var protocolVersion = 2;
+    var chunksPerImage = 3;
 
     dropZone.addEventListener('click', function() { fileInput.click(); });
     dropZone.addEventListener('dragover', function(e) { e.preventDefault(); dropZone.classList.add('dragover'); });
@@ -1136,6 +1310,7 @@
       rsEnabled = false;
       rsK = 0;
       protocolVersion = 2;
+      chunksPerImage = isMonoDecodeMode() ? 1 : 3;
       decodeStatus.textContent = 'Ready to decode';
       decodeProgress.style.width = '0%';
       chunkGrid.innerHTML = '';
@@ -1357,6 +1532,7 @@
       btnCancel.classList.remove('hidden');
       decodedChunks = {};
       expectedTotal = null;
+      chunksPerImage = isMonoDecodeMode() ? 1 : 3;
 
       var reader = new FileReader();
       reader.onload = async function() {
@@ -1391,20 +1567,7 @@
           ctx.putImageData(frameImg, frame.left, frame.top);
           prevData = ctx.getImageData(0, 0, screenW, screenH);
           var fullImg = ctx.getImageData(0, 0, screenW, screenH);
-          var gImg = extractChannelImageData(fullImg, 1);
-          var gCode = jsQR(gImg.data, gImg.width, gImg.height, { inversionAttempts: 'attemptBoth' });
-          var gifLoc = null;
-          if (gCode) {
-            if (gCode.data || gCode.binaryData) processQRData(gCode.data || '', gCode.binaryData);
-            gifLoc = gCode.location;
-          }
-          [0, 2].forEach(function(ch) {
-            var code = gifLoc ? scanChannelWithHint(fullImg, ch, gifLoc) : (function() {
-              var chImg = extractChannelImageData(fullImg, ch);
-              return jsQR(chImg.data, chImg.width, chImg.height, { inversionAttempts: 'attemptBoth' });
-            })();
-            if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
-          });
+          scanRgbFrame(fullImg, processQRData, decodedChunks, expectedTotal, chunksPerImage === 1);
 
           var found = Object.keys(decodedChunks).length;
           var total = expectedTotal || '?';
@@ -1433,6 +1596,7 @@
       btnCancel.classList.remove('hidden');
       decodedChunks = {};
       expectedTotal = null;
+      chunksPerImage = isMonoDecodeMode() ? 1 : 3;
 
       var video = document.createElement('video');
       video.muted = true;
@@ -1459,20 +1623,7 @@
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         framesScanned++;
-        var vGImg = extractChannelImageData(imageData, 1);
-        var vGCode = jsQR(vGImg.data, vGImg.width, vGImg.height, { inversionAttempts: 'attemptBoth' });
-        var vidLoc = null;
-        if (vGCode) {
-          if (vGCode.data || vGCode.binaryData) processQRData(vGCode.data || '', vGCode.binaryData);
-          vidLoc = vGCode.location;
-        }
-        [0, 2].forEach(function(ch) {
-          var code = vidLoc ? scanChannelWithHint(imageData, ch, vidLoc) : (function() {
-            var chImg = extractChannelImageData(imageData, ch);
-            return jsQR(chImg.data, chImg.width, chImg.height, { inversionAttempts: 'attemptBoth' });
-          })();
-          if (code && (code.data || code.binaryData)) processQRData(code.data || '', code.binaryData);
-        });
+        scanRgbFrame(imageData, processQRData, decodedChunks, expectedTotal, chunksPerImage === 1);
         var pct = Math.min((time / duration) * 100, 99);
         decodeProgress.style.width = pct + '%';
         var found = Object.keys(decodedChunks).length;
@@ -1501,12 +1652,13 @@
             isZipped = v3Frame.zip;
             rsEnabled = v3Frame.rs;
             rsK = v3Frame.k;
+            chunksPerImage = (isMonoDecodeMode() || v3Frame.mono) ? 1 : 3;
             if (v3Frame.meta) {
               expectedHash = v3Frame.meta.hash;
               fileName = v3Frame.meta.name;
               originalSize = v3Frame.meta.originalSize;
             }
-            initChunkGrid(expectedTotal);
+            initChunkGrid(expectedTotal, chunksPerImage);
           } else if (v3Frame.meta) {
             expectedHash = v3Frame.meta.hash;
             fileName = v3Frame.meta.name;
@@ -1514,7 +1666,7 @@
           }
           updateChunkGrid();
           updatePreview();
-          return;
+          return { i: v3Frame.i, n: v3Frame.n, v: 3, mono: isMonoDecodeMode() || v3Frame.mono };
         }
 
         var chunk = JSON.parse(data);
@@ -1529,26 +1681,30 @@
             isZipped = chunk.zip === 1;
             rsEnabled = chunk.rs === 1;
             rsK = chunk.k || chunk.n;
-            initChunkGrid(expectedTotal);
+            chunksPerImage = isMonoDecodeMode() ? 1 : 3;
+            initChunkGrid(expectedTotal, chunksPerImage);
           }
           updateChunkGrid();
           updatePreview();
+          return { i: chunk.i, n: chunk.n, v: chunk.v };
         }
       } catch (e) { console.warn('processQRData: invalid QR data', e); }
+      return null;
     }
 
     var fileGridCells = [];
 
-    function initChunkGrid(total) {
+    function initChunkGrid(total, perImageArg) {
       chunkGrid.innerHTML = '';
       fileGridCells = [];
-      var numImages = Math.ceil(total / 3);
+      var perImage = perImageArg || 3;
+      var numImages = Math.ceil(total / perImage);
       for (var i = 0; i < numImages; i++) {
         var cell = document.createElement('div');
         cell.className = 'chunk-cell';
         cell.textContent = i;
         cell.dataset.imageIndex = i;
-        cell.title = 'Image ' + i + ' (chunks ' + (i*3) + '-' + Math.min(i*3+2, total-1) + ')';
+        cell.title = 'Image ' + i + ' (chunks ' + (i * perImage) + '-' + Math.min(i * perImage + perImage - 1, total - 1) + ')';
         chunkGrid.appendChild(cell);
         fileGridCells.push(cell);
       }
@@ -1559,12 +1715,18 @@
       chunkInfo.textContent = found + ' / ' + expectedTotal;
       var total = expectedTotal;
       for (var i = 0; i < fileGridCells.length; i++) {
-        var base = i * 3;
-        var hasG = decodedChunks[base] !== undefined || (total !== null && base >= total);
-        var hasR = decodedChunks[base+1] !== undefined || (total !== null && base+1 >= total);
-        var hasB = decodedChunks[base+2] !== undefined || (total !== null && base+2 >= total);
-        fileGridCells[i].style.background = 'rgb(' + (hasR?255:40) + ',' + (hasG?255:40) + ',' + (hasB?255:40) + ')';
-        fileGridCells[i].style.color = (hasR && hasG && hasB) ? '#111' : '#cdd6f4';
+        var base = i * chunksPerImage;
+        if (chunksPerImage === 1) {
+          var hasChunk = decodedChunks[base] !== undefined || (total !== null && base >= total);
+          fileGridCells[i].style.background = hasChunk ? 'var(--success)' : 'var(--border)';
+          fileGridCells[i].style.color = hasChunk ? '#111' : '#cdd6f4';
+        } else {
+          var hasG = decodedChunks[base] !== undefined || (total !== null && base >= total);
+          var hasR = decodedChunks[base+1] !== undefined || (total !== null && base+1 >= total);
+          var hasB = decodedChunks[base+2] !== undefined || (total !== null && base+2 >= total);
+          fileGridCells[i].style.background = 'rgb(' + (hasR?255:40) + ',' + (hasG?255:40) + ',' + (hasB?255:40) + ')';
+          fileGridCells[i].style.color = (hasR && hasG && hasB) ? '#111' : '#cdd6f4';
+        }
       }
     }
 
@@ -1694,8 +1856,9 @@
         if (isGzipped) metaHtml += '<span class="badge badge-info">gzip</span>';
         if (isZipped) metaHtml += '<span class="badge badge-info">zip archive</span>';
         if (useRS && finalComplete) metaHtml += '<span class="badge badge-comp">RS recovered</span>';
+        var verification = verifyDecodedBytes(bytes, expectedHash, finalComplete);
+        if (verification.actual && verification.actual !== String(expectedHash).toLowerCase()) metaHtml += '<span class="badge badge-error">got ' + verification.actual + '</span>';
         resultMeta.innerHTML = metaHtml;
-        if (finalComplete) { resultBadge.textContent = 'VERIFIED'; resultBadge.className = 'badge badge-success'; }
 
         if (isZipped) {
           resultCode.textContent = '[' + formatSize(bytes.length) + ' ZIP archive — see files below]';
@@ -1746,9 +1909,9 @@
         if (isGzipped) metaHtml += '<span class="badge badge-info">gzip</span>';
         if (isZipped) metaHtml += '<span class="badge badge-info">zip archive</span>';
         if ((useRS || assembled.recovered) && assembled.recovered) metaHtml += '<span class="badge badge-comp">RS recovered</span>';
+        var verification = verifyDecodedBytes(bytes, expectedHash, true);
+        if (verification.actual && verification.actual !== String(expectedHash).toLowerCase()) metaHtml += '<span class="badge badge-error">got ' + verification.actual + '</span>';
         resultMeta.innerHTML = metaHtml;
-        resultBadge.textContent = 'VERIFIED';
-        resultBadge.className = 'badge badge-success';
 
         if (isZipped) {
           resultCode.textContent = '[' + formatSize(bytes.length) + ' ZIP archive — see files below]';
