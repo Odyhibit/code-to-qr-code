@@ -2,7 +2,7 @@
 
 Transfer files via animated QR codes. No network, no Bluetooth, no USB — just a screen and a camera.
 
-**[Try it live](https://sdcvo.github.io/code-to-qr-code/)**
+**[Try it live](https://odyhibit.github.io/code-to-qr-code/)**
 
 ## How it works
 
