@@ -157,6 +157,7 @@ describe('QR fixed mask generation', () => {
     assert.ok(response);
     assert.strictEqual(response.id, 7);
     assert.strictEqual(response.generation, 3);
+    assert.strictEqual(response.results.some(result => result.channel === 'direct'), false);
     const byChannel = Object.fromEntries(response.results.map(result => [result.channel, result.data]));
     assert.strictEqual(byChannel.red, payloads[0]);
     assert.strictEqual(byChannel.green, payloads[1]);

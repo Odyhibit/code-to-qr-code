@@ -268,7 +268,7 @@
       <div class="camera-overlay">
         <span class="badge" id="camera-scanner-badge">jsQR</span>
         <span class="badge" id="camera-fps-badge">-- fps</span>
-        <span class="badge" id="camera-qr-rate-badge">-- qr/s</span>
+        <span class="badge" id="camera-qr-rate-badge">-- new/s</span>
         <span class="badge" id="camera-chunks-badge">0 chunks</span>
       </div>
     </div>
@@ -547,8 +547,8 @@
       return getDecodeMode() === 'bw';
     }
 
-    function scanRgbFrame(imageData, processFn, chunkMap, expectedTotalValue, knownMono) {
-      var mode = getDecodeMode();
+    function scanRgbFrame(imageData, processFn, chunkMap, expectedTotalValue, knownMono, modeOverride) {
+      var mode = modeOverride || getDecodeMode();
       var useFullImageOnly = knownMono || mode === 'bw';
       if (mode !== 'color') {
         var directCode = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
@@ -615,11 +615,13 @@
     var camCompletedCount = 0;
     var camBusyDropCount = 0;
     var camValidQrCount = 0;
+    var camUniqueChunkCount = 0;
     var camScanStarted = {};
     var camLatencyTotal = 0;
     var camLatencyMax = 0;
     var camChannelHits = { direct: 0, green: 0, red: 0, blue: 0 };
     var camLastStats = null;
+    var camTransferMode = null;
 
     function activateCameraWorkerFallback(reason) {
       if (camWorkerFallback) return;
@@ -727,11 +729,14 @@
       camCompletedCount = 0;
       camBusyDropCount = 0;
       camValidQrCount = 0;
+      camUniqueChunkCount = 0;
       camScanStarted = {};
       camLatencyTotal = 0;
       camLatencyMax = 0;
       camChannelHits = { direct: 0, green: 0, red: 0, blue: 0 };
-      camLastStats = { time: camLastFpsTime, submitted: 0, completed: 0, dropped: 0, valid: 0 };
+      camLastStats = { time: camLastFpsTime, submitted: 0, completed: 0, dropped: 0, valid: 0, unique: 0 };
+      camTransferMode = getDecodeMode() === 'bw' ? 'mono' :
+        (getDecodeMode() === 'color' ? 'color' : null);
       startCameraWorkers();
 
       cameraChunkGrid.innerHTML = '';
@@ -741,7 +746,7 @@
       cameraPreviewSection.classList.add('hidden');
       cameraFpsBadge.textContent = '-- fps';
       cameraFpsBadge.className = 'badge';
-      cameraQrRateBadge.textContent = '-- qr/s';
+      cameraQrRateBadge.textContent = '-- new/s';
       cameraQrRateBadge.className = 'badge';
       cameraScannerBadge.textContent = 'jsQR · starting';
       cameraChunksBadge.textContent = '0 chunks';
@@ -841,14 +846,16 @@
       camFrameCount++;
       var scanId = ++camScanId;
       camScanStarted[scanId] = performance.now();
+      var workerMode = getDecodeMode();
+      if (workerMode === 'auto' && camTransferMode === 'color') workerMode = 'color';
       camWorkers[workerSlot].postMessage({
         id: scanId,
         generation: camWorkerGeneration,
         buffer: imageData.data.buffer,
         width: imageData.width,
         height: imageData.height,
-        mode: getDecodeMode(),
-        knownMono: camChunksPerImage === 1
+        mode: workerMode,
+        knownMono: camTransferMode === 'mono' || camChunksPerImage === 1
       }, [imageData.data.buffer]);
     }
 
@@ -866,7 +873,8 @@
         var frame = camProcessQR(data, binaryData);
         if (frame) camValidQrCount++;
         return frame;
-      }, camDecodedChunks, camExpectedTotal, camChunksPerImage === 1);
+      }, camDecodedChunks, camExpectedTotal, camTransferMode === 'mono' || camChunksPerImage === 1,
+        getDecodeMode() === 'auto' && camTransferMode === 'color' ? 'color' : null);
       camCompletedCount++;
       var latency = performance.now() - startedAt;
       camLatencyTotal += latency;
@@ -882,11 +890,13 @@
         var scanRate = (camCompletedCount - camLastStats.completed) / elapsed;
         var dropRate = (camBusyDropCount - camLastStats.dropped) / elapsed;
         var validRate = (camValidQrCount - camLastStats.valid) / elapsed;
+        var uniqueRate = (camUniqueChunkCount - camLastStats.unique) / elapsed;
         var averageLatency = camCompletedCount ? camLatencyTotal / camCompletedCount : 0;
         cameraFpsBadge.textContent = scanRate.toFixed(1) + ' scan/s';
-        cameraQrRateBadge.textContent = validRate.toFixed(1) + ' qr/s';
+        cameraQrRateBadge.textContent = uniqueRate.toFixed(1) + ' new/s';
         cameraDiagnostics.textContent = 'submit ' + submitRate.toFixed(1) + '/s · scan ' +
-          scanRate.toFixed(1) + '/s · valid ' + validRate.toFixed(1) + '/s · busy drops ' +
+          scanRate.toFixed(1) + '/s · new ' + uniqueRate.toFixed(1) + '/s · raw QR ' +
+          validRate.toFixed(1) + '/s · busy drops ' +
           dropRate.toFixed(1) + '/s · latency ' + averageLatency.toFixed(0) + ' ms avg';
         cameraDiagnostics.title = 'Max latency ' + camLatencyMax.toFixed(0) + ' ms · channel hits: direct ' +
           camChannelHits.direct + ', green ' + camChannelHits.green + ', red ' +
@@ -896,7 +906,8 @@
           submitted: camFrameCount,
           completed: camCompletedCount,
           dropped: camBusyDropCount,
-          valid: camValidQrCount
+          valid: camValidQrCount,
+          unique: camUniqueChunkCount
         };
         camLastFpsTime = now;
         camLastFpsCount = camFrameCount;
@@ -926,6 +937,8 @@
           var v3New = camDecodedChunks[v3Frame.i] === undefined;
           camDecodedChunks[v3Frame.i] = v3Frame;
           camProtocolVersion = 3;
+          camTransferMode = (isMonoDecodeMode() || v3Frame.mono) ? 'mono' : 'color';
+          if (v3New) camUniqueChunkCount++;
 
           if (!camExpectedTotal) {
             camExpectedTotal = v3Frame.n;
@@ -960,6 +973,8 @@
         if ((chunk.v === 1 || chunk.v === 2) && typeof chunk.i === 'number' && typeof chunk.n === 'number' && chunk.d) {
           var isNew = camDecodedChunks[chunk.i] === undefined;
           camDecodedChunks[chunk.i] = chunk.d;
+          camTransferMode = isMonoDecodeMode() ? 'mono' : 'color';
+          if (isNew) camUniqueChunkCount++;
 
           if (!camExpectedTotal) {
             camExpectedTotal = chunk.n;
