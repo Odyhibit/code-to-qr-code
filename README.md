@@ -31,7 +31,7 @@ Open `encoder/index.html` or `decoder/index.html` directly in a browser. Camera 
 - Multi-file and folder support (auto-zipped)
 - Gzip compression
 - GIF, MP4, and WebM export
-- Reed-Solomon erasure coding (+2/+5/+10 parity chunks)
+- Striped Reed-Solomon erasure coding (12%/25%/38% recovery levels)
 - Adjustable QR version and error correction level (L/M/Q/H)
 
 **Decoding:**
@@ -84,22 +84,27 @@ test/test.js            Test suite
 
 Encoder and decoder pages bundle all dependencies locally — no CDN, no build step. They work from `file://`, GitHub Pages, or the dev server.
 
-## Chunk protocol (v3)
+## Chunk protocol (v4)
 
-The encoder emits compact binary QR frames. The decoder still accepts the older JSON v1/v2 frames for compatibility.
+The encoder emits compact binary QR frames with striped Reed-Solomon recovery.
 
-Frame layout:
+Every v4 frame has this layout:
 
 ```text
-"Q3" magic
-flags byte: gzip, zip, Reed-Solomon, parity
-frame index varint
-total frame count varint
-data frame count varint
-binary frame body
+2 bytes  magic ("Q4")
+1 byte   flags: gzip, zip, Reed-Solomon, parity, monochrome
+varint   global transmitted-frame index
+varint   total transmitted-frame count
+varint   total data-frame count
+varint   stripe index
+varint   stripe count
+varint   shard index within the stripe
+varint   data-shard count in the stripe
+varint   total-shard count in the stripe
+bytes    frame body
 ```
 
-Frame 0's body starts with transfer metadata, then binary payload bytes:
+Stripe 0, shard 0 starts with transfer metadata followed by binary payload bytes:
 
 ```text
 encoded payload size varint
@@ -111,7 +116,9 @@ filename UTF-8 bytes
 payload bytes
 ```
 
-Other data frames contain only binary payload bytes. Parity frames contain Reed-Solomon parity bytes. Reed-Solomon protects data frame bodies, including frame 0 metadata, so a missing metadata frame can be recovered from parity.
+Other data frames contain only binary payload bytes. Data is divided into stripes of at most 32 frames, and each stripe gets its own Reed-Solomon parity. The Low, Balanced, and High settings add up to 4, 8, or 12 repair frames per full stripe; the final short stripe receives proportional parity. This bounds recovery work and prevents losses in one part of a large transfer from consuming redundancy intended for another part. The frames are emitted by shard position across stripes so a short burst of missed camera frames is spread between stripes.
+
+Parity protects complete frame bodies, including the metadata in stripe 0. The decoder can finish as soon as every stripe has at least as many received shards as data shards; it does not need to wait for the particular frames it missed to appear on another loop.
 
 With RGB encoding the total logical frame count is approximately 3× what it would be for a single-channel encode of the same file. The frame index field in each QR payload is the absolute logical frame number, so the protocol layer is unaware of the channel grouping — the decoder simply collects frames by index as they arrive from whichever channel decoded them.
 
@@ -121,14 +128,14 @@ With RGB encoding the total logical frame count is approximately 3× what it wou
 npm test
 ```
 
-Tests covering GF(256) arithmetic, Reed-Solomon encode/decode, recovery scenarios, v3 binary framing, path traversal protection, GIF parser bounds checking, and the full encode→RS→recover→decompress pipeline.
+Tests cover GF(256) arithmetic, Reed-Solomon encode/decode, striped v4 recovery and failure boundaries, binary framing, path traversal protection, GIF parser bounds checking, and the full encode→RS→recover→decompress pipeline.
 
 ## Camera tips
 
 - **Fast scanning**: lower QR version + EC level L = larger cells, easier to scan
 - **Fewer frames**: higher QR version + EC level M = fewer images in the sequence
-- **Missed chunks**: add +2 or +5 RS parity to recover from dropped frames
-- **Encoder FPS**: start at 3–6 FPS and adjust
+- **Missed chunks**: use Balanced or High striped recovery for an unreliable camera path
+- **Encoder FPS**: monochrome can run up to 25 FPS; raise it until unique-frame throughput stops improving
 
 ## Requirements
 

@@ -223,11 +223,11 @@
       </div>
     </div>
     <div class="actions hidden" id="rs-section" style="margin-top:12px;gap:12px;align-items:center;">
-      <span style="font-size:0.9em;">Reed-Solomon parity:</span>
+      <span style="font-size:0.9em;">Striped recovery:</span>
       <button id="btn-rs-off" style="padding:4px 12px;font-size:0.8em;">Off</button>
-      <button id="btn-rs-2" style="padding:4px 12px;font-size:0.8em;">+2</button>
-      <button id="btn-rs-5" style="padding:4px 12px;font-size:0.8em;">+5</button>
-      <button id="btn-rs-10" style="padding:4px 12px;font-size:0.8em;">+10</button>
+      <button id="btn-rs-2" style="padding:4px 12px;font-size:0.8em;">Low 12%</button>
+      <button id="btn-rs-5" style="padding:4px 12px;font-size:0.8em;">Balanced 25%</button>
+      <button id="btn-rs-10" style="padding:4px 12px;font-size:0.8em;">High 38%</button>
       <span class="badge" id="rs-overhead">no recovery</span>
     </div>
     <div class="hidden" id="density-section" style="margin-top:12px;">
@@ -367,7 +367,7 @@
     var FRAME_LOOKAHEAD = 3;
     var effectiveChunkSize = 500;
     var fixedSize = { w: 440, h: 440 };
-    var rsParity = 2;
+    var rsParity = 8;
 
     var densitySection = document.getElementById('density-section');
     var transferProfileSelect = document.getElementById('transfer-profile');
@@ -383,10 +383,10 @@
     var qrColorMode = 'color';
 
     var TRANSFER_PROFILES = {
-      'balanced': { version: 20, ec: 'M', fps: 3, parity: 2, delay: 400 },
-      'reliable-camera': { version: 16, ec: 'Q', fps: 3, parity: 5, delay: 500 },
-      'fast-camera': { version: 18, ec: 'M', fps: 6, parity: 5, delay: 250 },
-      'file-export': { version: 30, ec: 'L', fps: 10, parity: 2, delay: 120 }
+      'balanced': { version: 20, ec: 'M', fps: 3, parity: 8, delay: 400 },
+      'reliable-camera': { version: 16, ec: 'Q', fps: 3, parity: 12, delay: 500 },
+      'fast-camera': { version: 18, ec: 'M', fps: 6, parity: 8, delay: 250 },
+      'file-export': { version: 30, ec: 'L', fps: 10, parity: 4, delay: 120 }
     };
 
     var QR_BYTE_CAPACITY = {
@@ -432,10 +432,10 @@
       rsParity = n;
       var btns = [btnRsOff, btnRs2, btnRs5, btnRs10];
       btns.forEach(function(b) { b.style.background = ''; b.style.color = ''; });
-      var active = n === 0 ? btnRsOff : n === 2 ? btnRs2 : n === 5 ? btnRs5 : btnRs10;
+      var active = n === 0 ? btnRsOff : n === 4 ? btnRs2 : n === 8 ? btnRs5 : btnRs10;
       active.style.background = 'var(--success)';
       active.style.color = '#111';
-      rsOverhead.textContent = n === 0 ? 'no recovery' : 'recover up to ' + n + ' missing chunks';
+      rsOverhead.textContent = n === 0 ? 'no recovery' : 'up to ' + n + ' repairs per 32 data frames';
     }
 
     function applyTransferProfile(name) {
@@ -469,9 +469,9 @@
     });
 
     btnRsOff.addEventListener('click', function() { markCustomProfile(); setRsParity(0); reEncode(); });
-    btnRs2.addEventListener('click', function() { markCustomProfile(); setRsParity(2); reEncode(); });
-    btnRs5.addEventListener('click', function() { markCustomProfile(); setRsParity(5); reEncode(); });
-    btnRs10.addEventListener('click', function() { markCustomProfile(); setRsParity(10); reEncode(); });
+    btnRs2.addEventListener('click', function() { markCustomProfile(); setRsParity(4); reEncode(); });
+    btnRs5.addEventListener('click', function() { markCustomProfile(); setRsParity(8); reEncode(); });
+    btnRs10.addEventListener('click', function() { markCustomProfile(); setRsParity(12); reEncode(); });
 
     qrVersionSlider.addEventListener('input', function() {
       stopPlayback();
@@ -919,7 +919,7 @@
       ];
       if (useCompressed) metaParts.push('<span class="badge badge-comp">gzip compressed</span>');
       if (isZip) metaParts.push('<span class="badge badge-comp">zipped</span>');
-      if (rsParity > 0) metaParts.push('<span class="badge badge-comp">RS +' + (chunks.length - chunks[0].k) + ' parity (recover ' + rsParity + ')</span>');
+      if (rsParity > 0) metaParts.push('<span class="badge badge-comp">v4 striped RS · ' + (chunks.length - chunks[0].k) + ' parity</span>');
       qrMeta.innerHTML = metaParts.join(' &middot; ');
 
       currentFrame = 0;

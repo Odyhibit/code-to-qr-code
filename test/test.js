@@ -392,7 +392,7 @@ describe('FNV-1a hash', () => {
   });
 });
 
-describe('Protocol v3 binary framing', () => {
+describe('Protocol v4 striped binary framing', () => {
   it('round-trips binary payload without base64 expansion', () => {
     const data = new Uint8Array(1024);
     for (let i = 0; i < data.length; i++) data[i] = i & 0xff;
@@ -407,11 +407,11 @@ describe('Protocol v3 binary framing', () => {
       rsParity: 0
     });
 
-    assert.strictEqual(frames[0].v, 3);
+    assert.strictEqual(frames[0].v, 4);
     assert.ok(frames.length > 1);
     assert.ok(!('text' in frames[0]));
     assert.strictEqual(frames[0].bytes[0], 0x51);
-    assert.strictEqual(frames[0].bytes[1], 0x33);
+    assert.strictEqual(frames[0].bytes[1], 0x34);
     assert.ok(frames[0].bytes.length < 500 + 64);
 
     const decoded = {};
@@ -420,14 +420,14 @@ describe('Protocol v3 binary framing', () => {
       decoded[parsed.i] = parsed;
     });
 
-    const assembled = QrProtocolV3.assembleData(frames.map(frame => decoded[frame.i].body));
+    const assembled = QrProtocolV3.assembleStripedData(decoded);
     assert.strictEqual(assembled.meta.name, 'binary.bin');
     assert.strictEqual(assembled.meta.hash, '1234abcd');
     assert.deepStrictEqual(Buffer.from(assembled.bytes), Buffer.from(data));
   });
 
-  it('recovers missing metadata frame through Reed-Solomon parity', () => {
-    const data = Buffer.from('hello v3 reed-solomon recovery '.repeat(80));
+  it('recovers losses independently across multiple stripes', () => {
+    const data = Buffer.from('hello v4 striped reed-solomon recovery '.repeat(700));
     const frames = QrProtocolV3.buildFrames(data, {
       name: 'note.txt',
       hash: 'a1b2c3d4',
@@ -435,23 +435,56 @@ describe('Protocol v3 binary framing', () => {
       chunkBodySize: 300,
       gz: false,
       zip: false,
-      rsParity: 2
+      rsParity: 8
     });
 
-    const parsed = new Array(frames.length).fill(null);
+    const parsed = {};
+    const droppedPerStripe = {};
     frames.forEach(frame => {
-      if (frame.i !== 0 && frame.i !== 2) parsed[frame.i] = QrProtocolV3.decodeFrame(frame.bytes);
+      const dropLimit = Math.min(2, frame.d);
+      const dropped = droppedPerStripe[frame.s] || 0;
+      if (frame.j < frame.d && dropped < dropLimit) {
+        droppedPerStripe[frame.s] = dropped + 1;
+      } else {
+        parsed[frame.i] = QrProtocolV3.decodeFrame(frame.bytes);
+      }
     });
 
-    const recovered = QrProtocolV3.recoverBodies(parsed, frames[0].k);
-    assert.ok(recovered);
-    const assembled = QrProtocolV3.assembleData(recovered);
+    assert.ok(frames[0].g > 1);
+    assert.strictEqual(QrProtocolV3.canRecoverStriped(parsed), true);
+    const assembled = QrProtocolV3.assembleStripedData(parsed);
+    assert.ok(assembled);
+    assert.strictEqual(assembled.recovered, true);
     assert.strictEqual(assembled.meta.name, 'note.txt');
     assert.strictEqual(assembled.meta.hash, 'a1b2c3d4');
     assert.deepStrictEqual(Buffer.from(assembled.bytes), Buffer.from(data));
   });
 
-  it('preserves monochrome transfer flag on every v3 frame', () => {
+  it('does not claim recovery when one stripe has too many losses', () => {
+    const data = Buffer.from('stripe loss boundary '.repeat(700));
+    const frames = QrProtocolV3.buildFrames(data, {
+      name: 'boundary.txt',
+      hash: 'deadbeef',
+      originalSize: data.length,
+      chunkBodySize: 200,
+      gz: false,
+      zip: false,
+      rsParity: 4
+    });
+
+    const parsed = {};
+    frames.forEach(frame => {
+      // A full stripe has four parity shards. Losing five shards in just one
+      // stripe must remain incomplete even if every other stripe is intact.
+      if (frame.s === 0 && frame.j < 5) return;
+      parsed[frame.i] = QrProtocolV3.decodeFrame(frame.bytes);
+    });
+
+    assert.strictEqual(QrProtocolV3.canRecoverStriped(parsed), false);
+    assert.strictEqual(QrProtocolV3.assembleStripedData(parsed), null);
+  });
+
+  it('preserves monochrome transfer flag on every v4 frame', () => {
     const data = Buffer.from('black and white transfer mode');
     const frames = QrProtocolV3.buildFrames(data, {
       name: 'mono.txt',

@@ -434,6 +434,34 @@
       return new ImageData(out, imageData.width, imageData.height);
     }
 
+    var OTSU_REUSE_FRAMES = 10;
+    var OTSU_SAMPLE_STRIDE = 4;
+    var otsuCaches = {
+      redRect: createOtsuCache(), redCrop: createOtsuCache(),
+      blueRect: createOtsuCache(), blueCrop: createOtsuCache()
+    };
+
+    function createOtsuCache() {
+      return { valid: false, uses: 0, failures: 0, dark: 0, light: 255,
+        histogram: new Uint32Array(256), output: null };
+    }
+
+    function resetOtsuCaches() {
+      otsuCaches = {
+        redRect: createOtsuCache(), redCrop: createOtsuCache(),
+        blueRect: createOtsuCache(), blueCrop: createOtsuCache()
+      };
+    }
+
+    function channelOtsuCache(channel, kind) {
+      return otsuCaches[(channel === 0 ? 'red' : 'blue') + kind];
+    }
+
+    function recordOtsuResult(cache, succeeded) {
+      if (succeeded) cache.failures = 0;
+      else if (++cache.failures >= 2) { cache.valid = false; cache.uses = 0; }
+    }
+
     function cropToLocation(imageData, location, pad) {
       var corners = [location.topLeftCorner, location.topRightCorner,
                      location.bottomRightCorner, location.bottomLeftCorner];
@@ -455,52 +483,67 @@
       return new ImageData(out, cw, ch);
     }
 
-    function otsuNormalize(imageData, channel) {
+    function otsuNormalize(imageData, channel, cache) {
       var d = imageData.data, n = imageData.width * imageData.height;
-      var hist = new Int32Array(256);
-      for (var i = 0; i < n; i++) hist[d[i * 4 + channel]]++;
+      cache = cache || createOtsuCache();
+      if (!cache.valid || cache.uses >= OTSU_REUSE_FRAMES) {
+        var hist = cache.histogram;
+        hist.fill(0);
+        var sampledCount = 0;
+        for (var i = 0; i < n; i += OTSU_SAMPLE_STRIDE) {
+          hist[d[i * 4 + channel]]++;
+          sampledCount++;
+        }
 
-      // Otsu threshold — finds the split that maximises inter-class variance
-      var sumAll = 0;
-      for (var v = 0; v < 256; v++) sumAll += v * hist[v];
-      var sumB = 0, wB = 0, maxVar = 0, thresh = 128;
-      for (var t = 0; t < 256; t++) {
-        wB += hist[t]; if (wB === 0) continue;
-        var wF = n - wB; if (wF === 0) break;
-        sumB += t * hist[t];
-        var mB = sumB / wB, mF = (sumAll - sumB) / wF;
-        var bvar = wB * wF * (mB - mF) * (mB - mF);
-        if (bvar > maxVar) { maxVar = bvar; thresh = t; }
+        // Recalibration samples one pixel in four; normalization still uses every pixel.
+        var sumAll = 0;
+        for (var v = 0; v < 256; v++) sumAll += v * hist[v];
+        var sumB = 0, wB = 0, maxVar = 0, thresh = 128;
+        for (var t = 0; t < 256; t++) {
+          wB += hist[t]; if (wB === 0) continue;
+          var wF = sampledCount - wB; if (wF === 0) break;
+          sumB += t * hist[t];
+          var mB = sumB / wB, mF = (sumAll - sumB) / wF;
+          var bvar = wB * wF * (mB - mF) * (mB - mF);
+          if (bvar > maxVar) { maxVar = bvar; thresh = t; }
+        }
+
+        var darkSum = 0, darkCount = 0, lightSum = 0, lightCount = 0;
+        for (var value = 0; value < 256; value++) {
+          if (value <= thresh) { darkSum += value * hist[value]; darkCount += hist[value]; }
+          else { lightSum += value * hist[value]; lightCount += hist[value]; }
+        }
+        cache.dark = darkCount ? darkSum / darkCount : 0;
+        cache.light = lightCount ? lightSum / lightCount : 255;
+        cache.valid = true;
+        cache.uses = 0;
       }
+      cache.uses++;
+      var range = cache.light - cache.dark || 1;
 
-      // Mean of each cluster = "most common dark" and "most common light"
-      var darkSum = 0, darkCount = 0, lightSum = 0, lightCount = 0;
-      for (var v = 0; v < 256; v++) {
-        if (v <= thresh) { darkSum += v * hist[v]; darkCount += hist[v]; }
-        else             { lightSum += v * hist[v]; lightCount += hist[v]; }
-      }
-      var darkCenter  = darkCount  ? darkSum  / darkCount  : 0;
-      var lightCenter = lightCount ? lightSum / lightCount : 255;
-      var range = lightCenter - darkCenter || 1;
-
-      // Stretch so dark cluster → 0, light cluster → 255
-      var out = new Uint8ClampedArray(n * 4);
+      if (!cache.output || cache.output.length !== n * 4) cache.output = new Uint8ClampedArray(n * 4);
+      var out = cache.output;
       for (var i = 0; i < n; i++) {
-        var v = Math.min(255, Math.max(0, Math.round((d[i * 4 + channel] - darkCenter) * 255 / range)));
-        out[i*4] = v; out[i*4+1] = v; out[i*4+2] = v; out[i*4+3] = 255;
+        var normalized = Math.min(255, Math.max(0, Math.round((d[i * 4 + channel] - cache.dark) * 255 / range)));
+        out[i*4] = normalized; out[i*4+1] = normalized; out[i*4+2] = normalized; out[i*4+3] = 255;
       }
       return new ImageData(out, imageData.width, imageData.height);
     }
 
     function scanChannelWithHint(imageData, channel, location) {
-      var rectified = rectifyChannelToLocation(imageData, channel, location);
+      var rectCache = channelOtsuCache(channel, 'Rect');
+      var rectified = rectifyChannelToLocation(imageData, channel, location, rectCache);
       if (rectified) {
         var rectCode = jsQR(rectified.data, rectified.width, rectified.height, { inversionAttempts: 'attemptBoth' });
+        recordOtsuResult(rectCache, !!rectCode);
         if (rectCode) return rectCode;
       }
       var crop = cropToLocation(imageData, location, 20);
-      var normalized = otsuNormalize(crop, channel);
-      return jsQR(normalized.data, normalized.width, normalized.height, { inversionAttempts: 'attemptBoth' });
+      var cropCache = channelOtsuCache(channel, 'Crop');
+      var normalized = otsuNormalize(crop, channel, cropCache);
+      var cropCode = jsQR(normalized.data, normalized.width, normalized.height, { inversionAttempts: 'attemptBoth' });
+      recordOtsuResult(cropCache, !!cropCode);
+      return cropCode;
     }
 
     function dist(a, b) {
@@ -508,7 +551,7 @@
       return Math.sqrt(dx * dx + dy * dy);
     }
 
-    function rectifyChannelToLocation(imageData, channel, location) {
+    function rectifyChannelToLocation(imageData, channel, location, cache) {
       if (!location) return null;
       var tl = location.topLeftCorner, tr = location.topRightCorner;
       var br = location.bottomRightCorner, bl = location.bottomLeftCorner;
@@ -532,7 +575,7 @@
           out[di] = val; out[di + 1] = val; out[di + 2] = val; out[di + 3] = 255;
         }
       }
-      return otsuNormalize(new ImageData(out, size, size), 0);
+      return otsuNormalize(new ImageData(out, size, size), 0, cache);
     }
 
     function decodedChunkExists(chunkMap, index, total) {
@@ -637,7 +680,9 @@
       stopCameraWorkers();
       camWorkerGeneration++;
       var generation = camWorkerGeneration;
-      var workerCount = Math.min(2, Math.max(1, navigator.hardwareConcurrency || 1));
+      var requestedWorkers = getDecodeMode() === 'bw' ? 2 : 4;
+      var reportedConcurrency = Number(navigator.hardwareConcurrency) || requestedWorkers;
+      var workerCount = Math.max(1, Math.min(requestedWorkers, reportedConcurrency));
       for (var i = 0; i < workerCount; i++) {
         (function(slot) {
           var worker = new Worker('qr-worker.js');
@@ -709,6 +754,7 @@
 
     function startCamera() {
       stopCamera(true);
+      resetOtsuCaches();
 
       camDecodedChunks = {};
       camExpectedTotal = null;
@@ -921,7 +967,8 @@
           camFinishDecode(true);
           return;
         }
-        if (camRsEnabled && found >= camRsK) {
+        var stripedRecoverable = camProtocolVersion === 4 && QrProtocolV3.canRecoverStriped(camDecodedChunks);
+        if (camRsEnabled && (stripedRecoverable || camProtocolVersion !== 4 && found >= camRsK)) {
           stopCamera(true);
           camFinishDecode(false);
           return;
@@ -936,7 +983,7 @@
         if (v3Frame) {
           var v3New = camDecodedChunks[v3Frame.i] === undefined;
           camDecodedChunks[v3Frame.i] = v3Frame;
-          camProtocolVersion = 3;
+          camProtocolVersion = v3Frame.v;
           camTransferMode = (isMonoDecodeMode() || v3Frame.mono) ? 'mono' : 'color';
           if (v3New) camUniqueChunkCount++;
 
@@ -966,7 +1013,7 @@
             void cameraContainer.offsetWidth;
             cameraContainer.classList.add('flash');
           }
-          return { i: v3Frame.i, n: v3Frame.n, v: 3, mono: isMonoDecodeMode() || v3Frame.mono };
+          return { i: v3Frame.i, n: v3Frame.n, v: v3Frame.v, mono: isMonoDecodeMode() || v3Frame.mono };
         }
 
         var chunk = JSON.parse(data);
@@ -1043,13 +1090,14 @@
     }
 
     function camUpdatePreview() {
-      if (camProtocolVersion === 3) {
+      if (camProtocolVersion >= 3) {
         camUpdatePreviewV3();
         return;
       }
       var found = Object.keys(camDecodedChunks).length;
       var complete = camExpectedTotal && found >= camExpectedTotal;
-      var rsEnough = camRsEnabled && found >= camRsK;
+      var rsEnough = camRsEnabled && (camProtocolVersion === 4
+        ? QrProtocolV3.canRecoverStriped(camDecodedChunks) : found >= camRsK);
       var displayComplete = complete || rsEnough;
       cameraPreviewBadge.textContent = displayComplete ? (rsEnough && !complete ? 'RS recoverable!' : 'complete!') : found + '/' + (camExpectedTotal || '?') + ' chunks';
       cameraPreviewBadge.className = 'badge ' + (displayComplete ? 'badge-success' : 'badge-info');
@@ -1091,10 +1139,24 @@
     function camUpdatePreviewV3() {
       var found = Object.keys(camDecodedChunks).length;
       var complete = camExpectedTotal && found >= camExpectedTotal;
-      var rsEnough = camRsEnabled && found >= camRsK;
+      var rsEnough = camRsEnabled && (camProtocolVersion === 4
+        ? QrProtocolV3.canRecoverStriped(camDecodedChunks) : found >= camRsK);
       var displayComplete = complete || rsEnough;
       cameraPreviewBadge.textContent = displayComplete ? (rsEnough && !complete ? 'RS recoverable!' : 'complete!') : found + '/' + (camExpectedTotal || '?') + ' chunks';
       cameraPreviewBadge.className = 'badge ' + (displayComplete ? 'badge-success' : 'badge-info');
+
+      if (camProtocolVersion === 4) {
+        if (!rsEnough && !complete) { cameraPreviewCode.textContent = '[collecting recoverable stripes]'; return; }
+        try {
+          var striped = QrProtocolV3.assembleStripedData(camDecodedChunks);
+          if (!striped) { cameraPreviewCode.textContent = '[collecting recoverable stripes]'; return; }
+          var stripedBytes = striped.bytes;
+          if (camIsGzipped) { try { stripedBytes = pako.ungzip(stripedBytes); } catch (e) { cameraPreviewCode.textContent = '[decompressing...]'; return; } }
+          try { cameraPreviewCode.textContent = new TextDecoder('utf-8', { fatal: true }).decode(stripedBytes); }
+          catch (e) { cameraPreviewCode.textContent = '[Binary — ' + formatSize(stripedBytes.length) + ']'; }
+        } catch (e) { cameraPreviewCode.textContent = '[decoding...]'; }
+        return;
+      }
 
       var first = camDecodedChunks[0];
       if (!first || !first.meta) {
@@ -1126,7 +1188,7 @@
     }
 
     function camFinishDecode(allFound) {
-      if (camProtocolVersion === 3) {
+      if (camProtocolVersion >= 3) {
         camFinishDecodeV3(allFound);
         return;
       }
@@ -1217,7 +1279,7 @@
       resultCard.classList.remove('hidden');
       resultCode.textContent = '';
 
-      var assembled = assembleV3Result(camDecodedChunks, camExpectedTotal, camRsK, camRsEnabled);
+      var assembled = assembleBinaryResult(camDecodedChunks, camExpectedTotal, camRsK, camRsEnabled, camProtocolVersion);
       if (!assembled) {
         resultBadge.textContent = 'INCOMPLETE';
         resultBadge.className = 'badge badge-error';
@@ -1383,6 +1445,11 @@
       return assembled;
     }
 
+    function assembleBinaryResult(frameMap, total, k, rsEnabled, version) {
+      if (version === 4) return QrProtocolV3.assembleStripedData(frameMap);
+      return assembleV3Result(frameMap, total, k, rsEnabled);
+    }
+
     // ===================== FILE UPLOAD DECODE =====================
 
     var decodedChunks = {};
@@ -1445,6 +1512,7 @@
     }
 
     btnDecode.addEventListener('click', function() {
+      resetOtsuCaches();
       if (isGif) {
         decodeGif();
       } else {
@@ -1772,7 +1840,7 @@
         var v3Frame = decodeV3Frame(data, binaryData);
         if (v3Frame) {
           decodedChunks[v3Frame.i] = v3Frame;
-          protocolVersion = 3;
+          protocolVersion = v3Frame.v;
           if (!expectedTotal) {
             expectedTotal = v3Frame.n;
             isGzipped = v3Frame.gz;
@@ -1793,7 +1861,7 @@
           }
           updateChunkGrid();
           updatePreview();
-          return { i: v3Frame.i, n: v3Frame.n, v: 3, mono: isMonoDecodeMode() || v3Frame.mono };
+          return { i: v3Frame.i, n: v3Frame.n, v: v3Frame.v, mono: isMonoDecodeMode() || v3Frame.mono };
         }
 
         var chunk = JSON.parse(data);
@@ -1858,7 +1926,7 @@
     }
 
     function updatePreview() {
-      if (protocolVersion === 3) {
+      if (protocolVersion >= 3) {
         updatePreviewV3();
         return;
       }
@@ -1866,7 +1934,8 @@
       if (found === 0) return;
       previewSection.classList.remove('hidden');
       var complete = expectedTotal && found >= expectedTotal;
-      var rsEnough = rsEnabled && found >= rsK;
+      var rsEnough = rsEnabled && (protocolVersion === 4
+        ? QrProtocolV3.canRecoverStriped(decodedChunks) : found >= rsK);
       var displayComplete = complete || rsEnough;
       previewBadge.textContent = displayComplete ? (rsEnough && !complete ? 'RS recoverable' : 'complete') : 'partial (' + found + '/' + expectedTotal + ')';
       previewBadge.className = 'badge ' + (displayComplete ? 'badge-success' : 'badge-info');
@@ -1896,10 +1965,24 @@
       if (found === 0) return;
       previewSection.classList.remove('hidden');
       var complete = expectedTotal && found >= expectedTotal;
-      var rsEnough = rsEnabled && found >= rsK;
+      var rsEnough = rsEnabled && (protocolVersion === 4
+        ? QrProtocolV3.canRecoverStriped(decodedChunks) : found >= rsK);
       var displayComplete = complete || rsEnough;
       previewBadge.textContent = displayComplete ? (rsEnough && !complete ? 'RS recoverable' : 'complete') : 'partial (' + found + '/' + expectedTotal + ')';
       previewBadge.className = 'badge ' + (displayComplete ? 'badge-success' : 'badge-info');
+
+      if (protocolVersion === 4) {
+        if (!rsEnough && !complete) { previewCode.textContent = '[collecting recoverable stripes]'; return; }
+        try {
+          var striped = QrProtocolV3.assembleStripedData(decodedChunks);
+          if (!striped) { previewCode.textContent = '[collecting recoverable stripes]'; return; }
+          var stripedBytes = striped.bytes;
+          if (isGzipped) { try { stripedBytes = pako.ungzip(stripedBytes); } catch (e) { previewCode.textContent = '[decompressing...]'; return; } }
+          try { previewCode.textContent = new TextDecoder('utf-8', { fatal: true }).decode(stripedBytes); }
+          catch (e) { previewCode.textContent = '[Binary — ' + formatSize(stripedBytes.length) + ']'; }
+        } catch (e) { previewCode.textContent = '[decoding...]'; }
+        return;
+      }
 
       var first = decodedChunks[0];
       if (!first || !first.meta) {
@@ -1925,7 +2008,8 @@
       var foundCount = Object.keys(decodedChunks).length;
       var allFound = expectedTotal && foundCount >= expectedTotal;
 
-      if (!allFound && rsEnabled && foundCount >= rsK) {
+      var stripedRecoverable = protocolVersion === 4 && QrProtocolV3.canRecoverStriped(decodedChunks);
+      if (!allFound && rsEnabled && (stripedRecoverable || protocolVersion !== 4 && foundCount >= rsK)) {
         decodeStatus.textContent = 'RS recovery: ' + foundCount + '/' + (expectedTotal || '?') + ' chunks (need ' + rsK + ').';
         assembleResult(false, true);
         return;
@@ -1941,7 +2025,7 @@
     }
 
     function assembleResult(complete, useRS) {
-      if (protocolVersion === 3) {
+      if (protocolVersion >= 3) {
         assembleResultV3(complete, useRS);
         return;
       }
@@ -2015,7 +2099,7 @@
       resultCard.classList.remove('hidden');
       resultCode.textContent = '';
 
-      var assembled = assembleV3Result(decodedChunks, expectedTotal, rsK, rsEnabled);
+      var assembled = assembleBinaryResult(decodedChunks, expectedTotal, rsK, rsEnabled, protocolVersion);
       if (!assembled) {
         resultBadge.textContent = 'INCOMPLETE';
         resultBadge.className = 'badge badge-error';

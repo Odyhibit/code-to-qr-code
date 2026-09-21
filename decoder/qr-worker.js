@@ -9,6 +9,26 @@ try {
   workerStartupError = error && error.message ? error.message : String(error);
 }
 var decodeQr = self.jsQR;
+var OTSU_REUSE_FRAMES = 10;
+var OTSU_SAMPLE_STRIDE = 4;
+var otsuCaches = {
+  redRect: createOtsuCache(), redCrop: createOtsuCache(),
+  blueRect: createOtsuCache(), blueCrop: createOtsuCache()
+};
+
+function createOtsuCache() {
+  return { valid: false, uses: 0, failures: 0, dark: 0, light: 255,
+    histogram: new Uint32Array(256), output: null };
+}
+
+function channelOtsuCache(channel, kind) {
+  return otsuCaches[(channel === 0 ? 'red' : 'blue') + kind];
+}
+
+function recordOtsuResult(cache, succeeded) {
+  if (succeeded) cache.failures = 0;
+  else if (++cache.failures >= 2) { cache.valid = false; cache.uses = 0; }
+}
 
 function extractChannelImageData(imageData, channel) {
   var source = imageData.data;
@@ -49,40 +69,52 @@ function cropToLocation(imageData, location, padding) {
   return { data: out, width: width, height: height };
 }
 
-function otsuNormalize(imageData, channel) {
+function otsuNormalize(imageData, channel, cache) {
   var data = imageData.data;
   var count = imageData.width * imageData.height;
-  var histogram = new Uint32Array(256);
-  for (var i = 0; i < count; i++) histogram[data[i * 4 + channel]]++;
+  cache = cache || createOtsuCache();
+  if (!cache.valid || cache.uses >= OTSU_REUSE_FRAMES) {
+    var histogram = cache.histogram;
+    histogram.fill(0);
+    var sampledCount = 0;
+    for (var i = 0; i < count; i += OTSU_SAMPLE_STRIDE) {
+      histogram[data[i * 4 + channel]]++;
+      sampledCount++;
+    }
 
-  var sumAll = 0;
-  for (var value = 0; value < 256; value++) sumAll += value * histogram[value];
-  var sumBackground = 0, backgroundWeight = 0, maxVariance = 0, threshold = 128;
-  for (var t = 0; t < 256; t++) {
-    backgroundWeight += histogram[t];
-    if (backgroundWeight === 0) continue;
-    var foregroundWeight = count - backgroundWeight;
-    if (foregroundWeight === 0) break;
-    sumBackground += t * histogram[t];
-    var backgroundMean = sumBackground / backgroundWeight;
-    var foregroundMean = (sumAll - sumBackground) / foregroundWeight;
-    var variance = backgroundWeight * foregroundWeight *
-      (backgroundMean - foregroundMean) * (backgroundMean - foregroundMean);
-    if (variance > maxVariance) { maxVariance = variance; threshold = t; }
-  }
+    var sumAll = 0;
+    for (var value = 0; value < 256; value++) sumAll += value * histogram[value];
+    var sumBackground = 0, backgroundWeight = 0, maxVariance = 0, threshold = 128;
+    for (var t = 0; t < 256; t++) {
+      backgroundWeight += histogram[t];
+      if (backgroundWeight === 0) continue;
+      var foregroundWeight = sampledCount - backgroundWeight;
+      if (foregroundWeight === 0) break;
+      sumBackground += t * histogram[t];
+      var backgroundMean = sumBackground / backgroundWeight;
+      var foregroundMean = (sumAll - sumBackground) / foregroundWeight;
+      var variance = backgroundWeight * foregroundWeight *
+        (backgroundMean - foregroundMean) * (backgroundMean - foregroundMean);
+      if (variance > maxVariance) { maxVariance = variance; threshold = t; }
+    }
 
-  var darkSum = 0, darkCount = 0, lightSum = 0, lightCount = 0;
-  for (var v = 0; v < 256; v++) {
-    if (v <= threshold) { darkSum += v * histogram[v]; darkCount += histogram[v]; }
-    else { lightSum += v * histogram[v]; lightCount += histogram[v]; }
+    var darkSum = 0, darkCount = 0, lightSum = 0, lightCount = 0;
+    for (var v = 0; v < 256; v++) {
+      if (v <= threshold) { darkSum += v * histogram[v]; darkCount += histogram[v]; }
+      else { lightSum += v * histogram[v]; lightCount += histogram[v]; }
+    }
+    cache.dark = darkCount ? darkSum / darkCount : 0;
+    cache.light = lightCount ? lightSum / lightCount : 255;
+    cache.valid = true;
+    cache.uses = 0;
   }
-  var darkCenter = darkCount ? darkSum / darkCount : 0;
-  var lightCenter = lightCount ? lightSum / lightCount : 255;
-  var range = lightCenter - darkCenter || 1;
-  var out = new Uint8ClampedArray(count * 4);
+  cache.uses++;
+  var range = cache.light - cache.dark || 1;
+  if (!cache.output || cache.output.length !== count * 4) cache.output = new Uint8ClampedArray(count * 4);
+  var out = cache.output;
   for (var p = 0; p < count; p++) {
     var normalized = Math.min(255, Math.max(0,
-      Math.round((data[p * 4 + channel] - darkCenter) * 255 / range)));
+      Math.round((data[p * 4 + channel] - cache.dark) * 255 / range)));
     out[p * 4] = normalized;
     out[p * 4 + 1] = normalized;
     out[p * 4 + 2] = normalized;
@@ -96,7 +128,7 @@ function distance(a, b) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-function rectifyChannelToLocation(imageData, channel, location) {
+function rectifyChannelToLocation(imageData, channel, location, cache) {
   if (!location) return null;
   var topLeft = location.topLeftCorner, topRight = location.topRightCorner;
   var bottomRight = location.bottomRightCorner, bottomLeft = location.bottomLeftCorner;
@@ -128,20 +160,25 @@ function rectifyChannelToLocation(imageData, channel, location) {
       out[targetIndex + 3] = 255;
     }
   }
-  return otsuNormalize({ data: out, width: size, height: size }, 0);
+  return otsuNormalize({ data: out, width: size, height: size }, 0, cache);
 }
 
 function scanChannelWithHint(imageData, channel, location) {
-  var rectified = rectifyChannelToLocation(imageData, channel, location);
+  var rectCache = channelOtsuCache(channel, 'Rect');
+  var rectified = rectifyChannelToLocation(imageData, channel, location, rectCache);
   if (rectified) {
     var rectifiedCode = decodeQr(rectified.data, rectified.width, rectified.height,
       { inversionAttempts: 'attemptBoth' });
+    recordOtsuResult(rectCache, !!rectifiedCode);
     if (rectifiedCode) return rectifiedCode;
   }
   var crop = cropToLocation(imageData, location, 20);
-  var normalized = otsuNormalize(crop, channel);
-  return decodeQr(normalized.data, normalized.width, normalized.height,
+  var cropCache = channelOtsuCache(channel, 'Crop');
+  var normalized = otsuNormalize(crop, channel, cropCache);
+  var cropCode = decodeQr(normalized.data, normalized.width, normalized.height,
     { inversionAttempts: 'attemptBoth' });
+  recordOtsuResult(cropCache, !!cropCode);
+  return cropCode;
 }
 
 function compactResult(code, channel) {
