@@ -7,8 +7,8 @@ Transfer files via animated QR codes. No network, no Bluetooth, no USB — just 
 ## How it works
 
 1. **Encode** — Drop a file or folder. It's compressed, split into chunks, and displayed as animated QR codes.
-2. **Transfer** — Point a phone camera at the screen, or export a GIF/video and send it any way you like.
-3. **Decode** — Open the decoder on the receiving device. Scan with the camera or upload the GIF/video. The file is reassembled.
+2. **Transfer** — Point a phone camera at the screen, or export an APNG, GIF, or video and send it any way you like.
+3. **Decode** — Open the decoder on the receiving device. Scan with the camera or upload the animation/video. The file is reassembled.
 
 Each image frame carries **three independent QR codes** — one per RGB colour channel — tripling data density with no increase in image size.
 
@@ -30,13 +30,13 @@ Open `encoder/index.html` or `decoder/index.html` directly in a browser. Camera 
 - RGB tri-channel encoding: three QR codes per image frame (~3× data density)
 - Multi-file and folder support (auto-zipped)
 - Gzip compression
-- GIF, MP4, and WebM export
+- Indexed APNG, GIF, MP4, and WebM export
 - Striped Reed-Solomon erasure coding (12%/25%/38% recovery levels)
 - Adjustable QR version and error correction level (L/M/Q/H)
 
 **Decoding:**
 - Live camera scan with jsQR, including raw binary QR payloads
-- GIF and video upload decoding
+- APNG, GIF, and video upload decoding
 - Per-channel adaptive thresholding (Otsu) for robust red/blue recovery
 - Progressive preview as chunks arrive
 - RS recovery of missing chunks
@@ -128,7 +128,7 @@ With RGB encoding the total logical frame count is approximately 3× what it wou
 npm test
 ```
 
-Tests cover GF(256) arithmetic, Reed-Solomon encode/decode, striped v4 recovery and failure boundaries, binary framing, path traversal protection, GIF parser bounds checking, and the full encode→RS→recover→decompress pipeline.
+Tests cover GF(256) arithmetic, Reed-Solomon encode/decode, striped v4 recovery and failure boundaries, indexed APNG round trips, binary framing, path traversal protection, GIF parser bounds checking, and the full encode→RS→recover→decompress pipeline.
 
 ## Camera tips
 

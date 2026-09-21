@@ -285,11 +285,11 @@
   <div class="divider"><span>or upload a file</span></div>
 
   <div class="card">
-    <h2>Upload Video or GIF</h2>
+    <h2>Upload Video, GIF, or APNG</h2>
     <div class="upload-zone" id="drop-zone">
-      <div>Drop video/GIF file here or click to browse</div>
-      <p>Supports MP4, WebM, MOV, GIF</p>
-      <input type="file" id="file-input" accept="video/*,image/gif">
+      <div>Drop video or animated image here, or click to browse</div>
+      <p>Supports MP4, WebM, MOV, GIF, APNG</p>
+      <input type="file" id="file-input" accept="video/*,image/gif,image/apng,image/png,.apng">
     </div>
     <video id="video-preview" class="video-preview hidden" controls muted></video>
     <img id="gif-preview" class="video-preview hidden" alt="GIF preview">
@@ -376,6 +376,7 @@
 
     var videoFile = null;
     var isGif = false;
+    var isApng = false;
     var cancelling = false;
 
     var hasGetUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
@@ -1479,11 +1480,12 @@
     function handleFile(file) {
       videoFile = file;
       isGif = file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif');
+      isApng = file.type === 'image/apng' || file.name.toLowerCase().endsWith('.apng');
 
       videoPreview.classList.add('hidden');
       gifPreview.classList.add('hidden');
 
-      if (isGif) {
+      if (isGif || isApng) {
         gifPreview.src = URL.createObjectURL(file);
         gifPreview.classList.remove('hidden');
       } else {
@@ -1515,6 +1517,8 @@
       resetOtsuCaches();
       if (isGif) {
         decodeGif();
+      } else if (isApng) {
+        decodeApng();
       } else {
         decodeVideo();
       }
@@ -1720,6 +1724,151 @@
 
       return { parseFrames: parseFrames, parseFramesGen: parseFramesGen };
     })();
+
+    var ApngParser = (function() {
+      function readUint32(data, offset) {
+        return ((data[offset] * 0x1000000) + (data[offset + 1] << 16) +
+          (data[offset + 2] << 8) + data[offset + 3]) >>> 0;
+      }
+
+      function chunkType(data, offset) {
+        return String.fromCharCode(data[offset], data[offset + 1], data[offset + 2], data[offset + 3]);
+      }
+
+      function join(parts) {
+        var length = 0;
+        for (var i = 0; i < parts.length; i++) length += parts[i].length;
+        var out = new Uint8Array(length);
+        var offset = 0;
+        for (var p = 0; p < parts.length; p++) { out.set(parts[p], offset); offset += parts[p].length; }
+        return out;
+      }
+
+      function paeth(a, b, c) {
+        var p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        return pa <= pb && pa <= pc ? a : (pb <= pc ? b : c);
+      }
+
+      function inflateFrame(frame, palette, bitDepth) {
+        var packed = pako.inflate(join(frame.parts));
+        var rowBytes = Math.ceil(frame.width * bitDepth / 8);
+        var expected = (rowBytes + 1) * frame.height;
+        if (packed.length < expected) throw new Error('Truncated APNG frame data');
+        var rows = new Uint8Array(rowBytes * frame.height);
+        var sourceOffset = 0;
+        for (var y = 0; y < frame.height; y++) {
+          var filter = packed[sourceOffset++];
+          var rowOffset = y * rowBytes;
+          var previousOffset = rowOffset - rowBytes;
+          for (var x = 0; x < rowBytes; x++) {
+            var raw = packed[sourceOffset++];
+            var left = x ? rows[rowOffset + x - 1] : 0;
+            var up = y ? rows[previousOffset + x] : 0;
+            var upperLeft = y && x ? rows[previousOffset + x - 1] : 0;
+            if (filter === 1) raw = (raw + left) & 255;
+            else if (filter === 2) raw = (raw + up) & 255;
+            else if (filter === 3) raw = (raw + Math.floor((left + up) / 2)) & 255;
+            else if (filter === 4) raw = (raw + paeth(left, up, upperLeft)) & 255;
+            else if (filter !== 0) throw new Error('Unsupported PNG filter');
+            rows[rowOffset + x] = raw;
+          }
+        }
+
+        var rgba = new Uint8ClampedArray(frame.width * frame.height * 4);
+        var mask = (1 << bitDepth) - 1;
+        for (var py = 0; py < frame.height; py++) {
+          var packedRow = py * rowBytes;
+          for (var px = 0; px < frame.width; px++) {
+            var bit = px * bitDepth;
+            var index = (rows[packedRow + (bit >> 3)] >> (8 - bitDepth - (bit & 7))) & mask;
+            var paletteOffset = index * 3;
+            var target = (py * frame.width + px) * 4;
+            rgba[target] = palette[paletteOffset] || 0;
+            rgba[target + 1] = palette[paletteOffset + 1] || 0;
+            rgba[target + 2] = palette[paletteOffset + 2] || 0;
+            rgba[target + 3] = 255;
+          }
+        }
+        return rgba;
+      }
+
+      function parse(data) {
+        var signature = [137,80,78,71,13,10,26,10];
+        for (var s = 0; s < signature.length; s++) if (data[s] !== signature[s]) return null;
+        var pos = 8, width = 0, height = 0, bitDepth = 0, colorType = -1;
+        var palette = null, frames = [], current = null, animated = false;
+        while (pos + 12 <= data.length) {
+          var length = readUint32(data, pos); pos += 4;
+          var type = chunkType(data, pos); pos += 4;
+          if (pos + length + 4 > data.length) throw new Error('Truncated PNG chunk');
+          var body = data.subarray(pos, pos + length); pos += length + 4;
+          if (type === 'IHDR') {
+            width = readUint32(body, 0); height = readUint32(body, 4);
+            bitDepth = body[8]; colorType = body[9];
+          } else if (type === 'PLTE') palette = new Uint8Array(body);
+          else if (type === 'acTL') animated = true;
+          else if (type === 'fcTL') {
+            if (current) frames.push(current);
+            current = { width: readUint32(body, 4), height: readUint32(body, 8),
+              left: readUint32(body, 12), top: readUint32(body, 16), parts: [] };
+          } else if (type === 'IDAT') {
+            if (!current) current = { width: width, height: height, left: 0, top: 0, parts: [] };
+            current.parts.push(new Uint8Array(body));
+          } else if (type === 'fdAT') {
+            if (!current || body.length < 4) throw new Error('Invalid APNG frame data');
+            current.parts.push(new Uint8Array(body.subarray(4)));
+          } else if (type === 'IEND') break;
+        }
+        if (current) frames.push(current);
+        if (!animated || !frames.length || !palette || colorType !== 3 ||
+            [1, 2, 4, 8].indexOf(bitDepth) === -1) return null;
+        return { width: width, height: height, bitDepth: bitDepth, palette: palette, frames: frames };
+      }
+
+      return { parse: parse, inflateFrame: inflateFrame };
+    })();
+
+    async function decodeApng() {
+      cancelling = false;
+      btnDecode.disabled = true;
+      btnCancel.classList.remove('hidden');
+      decodedChunks = {};
+      expectedTotal = null;
+      chunksPerImage = isMonoDecodeMode() ? 1 : 3;
+
+      try {
+        decodeStatus.textContent = 'Parsing APNG...';
+        var data = new Uint8Array(await videoFile.arrayBuffer());
+        var animation = ApngParser.parse(data);
+        if (!animation) throw new Error('Unsupported APNG (indexed APNG export expected)');
+        var canvas = document.createElement('canvas');
+        canvas.width = animation.width; canvas.height = animation.height;
+        var ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        for (var i = 0; i < animation.frames.length && !cancelling; i++) {
+          var frame = animation.frames[i];
+          var rgba = ApngParser.inflateFrame(frame, animation.palette, animation.bitDepth);
+          ctx.putImageData(new ImageData(rgba, frame.width, frame.height), frame.left, frame.top);
+          var fullImage = ctx.getImageData(0, 0, animation.width, animation.height);
+          scanRgbFrame(fullImage, processQRData, decodedChunks, expectedTotal, chunksPerImage === 1);
+          var found = Object.keys(decodedChunks).length;
+          var total = expectedTotal || '?';
+          decodeProgress.style.width = (((i + 1) / animation.frames.length) * 100).toFixed(0) + '%';
+          decodeStatus.textContent = 'Scanned APNG frame ' + (i + 1) + ', found ' + found + '/' + total;
+          if ((i + 1) % 10 === 0) await new Promise(function(resolve) { setTimeout(resolve, 0); });
+          if (expectedTotal && found >= expectedTotal) break;
+        }
+
+        decodeProgress.style.width = '100%';
+        if (cancelling) { decodeStatus.textContent = 'Cancelled.'; return; }
+        finishDecoding();
+      } catch (error) {
+        decodeStatus.textContent = 'Could not decode APNG: ' + (error.message || error);
+      } finally {
+        btnDecode.disabled = false;
+        btnCancel.classList.add('hidden');
+      }
+    }
 
     async function decodeGif() {
       cancelling = false;

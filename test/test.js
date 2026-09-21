@@ -6,6 +6,7 @@ const zlib = require('zlib');
 const vm = require('vm');
 const qrcodeFactory = require('../encoder/qrcode.js');
 const jsQR = require('../decoder/jsQR.min.js');
+const pako = require('../encoder/pako.min.js');
 
 const rsPath = path.join(__dirname, '..', 'shared', 'reedsolomon.js');
 const rsCode = fs.readFileSync(rsPath, 'utf8');
@@ -162,6 +163,51 @@ describe('QR fixed mask generation', () => {
     assert.strictEqual(byChannel.red, payloads[0]);
     assert.strictEqual(byChannel.green, payloads[1]);
     assert.strictEqual(byChannel.blue, payloads[2]);
+  });
+});
+
+describe('Indexed APNG export', () => {
+  function loadIife(file, variableName) {
+    const html = fs.readFileSync(file, 'utf8');
+    const marker = `var ${variableName} = (function() {`;
+    const start = html.indexOf(marker);
+    assert.ok(start >= 0, `${variableName} start not found`);
+    const end = html.indexOf('\n    })();', start);
+    assert.ok(end >= 0, `${variableName} end not found`);
+    const source = html.slice(start, end + '\n    })();'.length);
+    const context = { pako, Uint8Array, Uint8ClampedArray, Uint32Array, Math, Promise, setTimeout };
+    vm.runInNewContext(source, context);
+    return context[variableName];
+  }
+
+  it('round-trips indexed color and monochrome animation frames', async () => {
+    const encoder = loadIife(path.join(__dirname, '..', 'encoder', 'index.html'), 'SimpleApngEncoder');
+    const parser = loadIife(path.join(__dirname, '..', 'decoder', 'index.html'), 'ApngParser');
+    const width = 19, height = 13;
+
+    for (const monochrome of [false, true]) {
+      const limit = monochrome ? 2 : 8;
+      const frames = [0, 1, 2].map(offset => {
+        const pixels = new Uint8Array(width * height);
+        for (let i = 0; i < pixels.length; i++) pixels[i] = (i + offset) % limit;
+        return pixels;
+      });
+      const bytes = await encoder.encode(frames, width, height, 120, monochrome);
+      assert.deepStrictEqual(Array.from(bytes.subarray(0, 8)), [137, 80, 78, 71, 13, 10, 26, 10]);
+      const animation = parser.parse(bytes);
+      assert.ok(animation);
+      assert.strictEqual(animation.frames.length, frames.length);
+      for (let f = 0; f < frames.length; f++) {
+        const rgba = parser.inflateFrame(animation.frames[f], animation.palette, animation.bitDepth);
+        for (let i = 0; i < frames[f].length; i++) {
+          const paletteOffset = frames[f][i] * 3;
+          assert.strictEqual(rgba[i * 4], animation.palette[paletteOffset]);
+          assert.strictEqual(rgba[i * 4 + 1], animation.palette[paletteOffset + 1]);
+          assert.strictEqual(rgba[i * 4 + 2], animation.palette[paletteOffset + 2]);
+          assert.strictEqual(rgba[i * 4 + 3], 255);
+        }
+      }
+    }
   });
 });
 

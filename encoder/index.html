@@ -192,7 +192,7 @@
 </head>
 <body>
   <h1>Code to QR — Encoder</h1>
-  <p class="subtitle">Convert any file into animated QR codes — RGB tri-channel encoding, compression, and GIF export</p>
+  <p class="subtitle">Convert any file into animated QR codes — RGB tri-channel encoding, compression, and animated export</p>
 
   <div class="card">
     <h2>1. Select Files</h2>
@@ -300,18 +300,20 @@
       </p>
       <div class="export-options">
         <button id="btn-gif">Export GIF</button>
+        <button id="btn-apng">Export APNG</button>
         <button id="btn-video">Export Video (MP4/WebM)</button>
         <label>Loops: <input type="number" id="gif-loops" value="1" min="1" max="10"></label>
         <label>Delay (ms): <input type="number" id="gif-delay" value="400" min="100" max="2000" step="50"></label>
       </div>
       <div class="export-status hidden" id="gif-status"></div>
+      <div class="export-status hidden" id="apng-status"></div>
       <div class="export-status hidden" id="video-status"></div>
     </div>
 
     <div class="tip">
       <strong>Two ways to transfer:</strong><br>
       &bull; <strong>Record screen</strong> with phone camera while QR codes animate<br>
-      &bull; <strong>Export GIF</strong> and send via AirDrop/Bluetooth/USB to receiving computer<br>
+      &bull; <strong>Export APNG or GIF</strong> and send via AirDrop/Bluetooth/USB to receiving computer<br>
       Then open <strong>decoder/index.html</strong> to extract the file.
     </div>
   </div>
@@ -342,10 +344,12 @@
     var fpsSlider = document.getElementById('fps-slider');
     var loopBadge = document.getElementById('loop-badge');
     var btnGif = document.getElementById('btn-gif');
+    var btnApng = document.getElementById('btn-apng');
     var btnVideo = document.getElementById('btn-video');
     var gifLoopsInput = document.getElementById('gif-loops');
     var gifDelayInput = document.getElementById('gif-delay');
     var gifStatus = document.getElementById('gif-status');
+    var apngStatus = document.getElementById('apng-status');
     var videoStatus = document.getElementById('video-status');
     var rsSection = document.getElementById('rs-section');
     var rsOverhead = document.getElementById('rs-overhead');
@@ -1238,6 +1242,105 @@
       return { encode: encodeAsync };
     })();
 
+    var SimpleApngEncoder = (function() {
+      var crcTable = null;
+
+      function getCrcTable() {
+        if (crcTable) return crcTable;
+        crcTable = new Uint32Array(256);
+        for (var n = 0; n < 256; n++) {
+          var c = n;
+          for (var k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+          crcTable[n] = c >>> 0;
+        }
+        return crcTable;
+      }
+
+      function uint32(value) {
+        return new Uint8Array([(value >>> 24) & 255, (value >>> 16) & 255,
+          (value >>> 8) & 255, value & 255]);
+      }
+
+      function concat(parts) {
+        var length = 0;
+        for (var i = 0; i < parts.length; i++) length += parts[i].length;
+        var out = new Uint8Array(length);
+        var offset = 0;
+        for (var p = 0; p < parts.length; p++) { out.set(parts[p], offset); offset += parts[p].length; }
+        return out;
+      }
+
+      function chunk(type, data) {
+        var typeBytes = new Uint8Array(4);
+        for (var i = 0; i < 4; i++) typeBytes[i] = type.charCodeAt(i);
+        var crcInput = concat([typeBytes, data]);
+        var crc = 0xffffffff;
+        var table = getCrcTable();
+        for (var j = 0; j < crcInput.length; j++) crc = table[(crc ^ crcInput[j]) & 255] ^ (crc >>> 8);
+        return concat([uint32(data.length), typeBytes, data, uint32((crc ^ 0xffffffff) >>> 0)]);
+      }
+
+      function packAndFilter(pixels, width, height, bitDepth) {
+        var rowBytes = Math.ceil(width * bitDepth / 8);
+        var out = new Uint8Array((rowBytes + 1) * height);
+        var previous = new Uint8Array(rowBytes);
+        var raw = new Uint8Array(rowBytes);
+        var sub = new Uint8Array(rowBytes);
+        var up = new Uint8Array(rowBytes);
+        var outputOffset = 0;
+        for (var y = 0; y < height; y++) {
+          raw.fill(0);
+          var pixelOffset = y * width;
+          for (var x = 0; x < width; x++) {
+            var value = pixels[pixelOffset + x];
+            if (bitDepth === 1) raw[x >> 3] |= (value & 1) << (7 - (x & 7));
+            else raw[x >> 1] |= (value & 15) << ((x & 1) ? 0 : 4);
+          }
+          var noneScore = 0, subScore = 0, upScore = 0;
+          for (var b = 0; b < rowBytes; b++) {
+            sub[b] = (raw[b] - (b ? raw[b - 1] : 0)) & 255;
+            up[b] = (raw[b] - previous[b]) & 255;
+            noneScore += Math.min(raw[b], 256 - raw[b]);
+            subScore += Math.min(sub[b], 256 - sub[b]);
+            upScore += Math.min(up[b], 256 - up[b]);
+          }
+          var filter = noneScore <= subScore && noneScore <= upScore ? 0 : (subScore <= upScore ? 1 : 2);
+          out[outputOffset++] = filter;
+          out.set(filter === 0 ? raw : (filter === 1 ? sub : up), outputOffset);
+          outputOffset += rowBytes;
+          previous.set(raw);
+        }
+        return out;
+      }
+
+      async function encode(frames, width, height, delayMs, monochrome) {
+        var bitDepth = monochrome ? 1 : 4;
+        var palette = monochrome
+          ? new Uint8Array([0, 0, 0, 255, 255, 255])
+          : new Uint8Array([0,0,0, 255,0,0, 0,255,0, 255,255,0,
+              0,0,255, 255,0,255, 0,255,255, 255,255,255]);
+        var ihdr = concat([uint32(width), uint32(height), new Uint8Array([bitDepth, 3, 0, 0, 0])]);
+        var parts = [new Uint8Array([137,80,78,71,13,10,26,10]), chunk('IHDR', ihdr),
+          chunk('PLTE', palette), chunk('acTL', concat([uint32(frames.length), uint32(1)]))];
+        var sequence = 0;
+        var delay = Math.max(1, Math.min(65535, Math.round(delayMs)));
+
+        for (var f = 0; f < frames.length; f++) {
+          var control = concat([uint32(sequence++), uint32(width), uint32(height), uint32(0), uint32(0),
+            new Uint8Array([(delay >>> 8) & 255, delay & 255, 0x03, 0xe8, 0, 0])]);
+          parts.push(chunk('fcTL', control));
+          var compressed = pako.deflate(packAndFilter(frames[f], width, height, bitDepth), { level: 9 });
+          if (f === 0) parts.push(chunk('IDAT', compressed));
+          else parts.push(chunk('fdAT', concat([uint32(sequence++), compressed])));
+          if ((f + 1) % 10 === 0) await new Promise(function(resolve) { setTimeout(resolve, 0); });
+        }
+        parts.push(chunk('IEND', new Uint8Array(0)));
+        return concat(parts);
+      }
+
+      return { encode: encode };
+    })();
+
     btnGif.addEventListener('click', async function() {
       if (chunks.length === 0) return;
       fixedSize = calcFixedSize(chunks);
@@ -1306,6 +1409,77 @@
         console.error(err);
       }
       btnGif.disabled = false;
+    });
+
+    btnApng.addEventListener('click', async function() {
+      if (chunks.length === 0) return;
+      fixedSize = calcFixedSize(chunks);
+      if (fixedSize.error) {
+        apngStatus.classList.remove('hidden');
+        apngStatus.textContent = fixedSize.error;
+        return;
+      }
+
+      btnApng.disabled = true;
+      apngStatus.classList.remove('hidden');
+      apngStatus.textContent = 'Generating indexed frames...';
+
+      var loops = parseInt(gifLoopsInput.value) || 1;
+      var delay = parseInt(gifDelayInput.value) || 400;
+      var numImages = getNumImages();
+      var totalFrames = numImages * loops;
+      var aw = fixedSize.w, ah = fixedSize.h;
+      var monochrome = qrColorMode !== 'color';
+      var tempCanvas = document.createElement('canvas');
+      tempCanvas.width = aw; tempCanvas.height = ah;
+      var ctx = tempCanvas.getContext('2d', { willReadFrequently: true });
+      var frames = [];
+
+      for (var loop = 0; loop < loops; loop++) {
+        for (var i = 0; i < numImages; i++) {
+          try { drawCurrentModeFrame(tempCanvas, i, aw, ah); }
+          catch (err) {
+            apngStatus.textContent = 'Error rendering frame ' + (i + 1) + ': ' + (err.message || err);
+            btnApng.disabled = false;
+            return;
+          }
+          var rgba = ctx.getImageData(0, 0, aw, ah).data;
+          var pixels = new Uint8Array(aw * ah);
+          for (var p = 0; p < pixels.length; p++) {
+            var red = rgba[p * 4] >= 128 ? 1 : 0;
+            if (monochrome) pixels[p] = red;
+            else {
+              var green = rgba[p * 4 + 1] >= 128 ? 1 : 0;
+              var blue = rgba[p * 4 + 2] >= 128 ? 1 : 0;
+              pixels[p] = red | (green << 1) | (blue << 2);
+            }
+          }
+          frames.push(pixels);
+          if (frames.length % 20 === 0) {
+            apngStatus.textContent = 'Captured ' + frames.length + '/' + totalFrames + ' frames...';
+            await new Promise(function(resolve) { setTimeout(resolve, 0); });
+          }
+        }
+      }
+
+      apngStatus.textContent = 'Encoding APNG (' + frames.length + ' frames)...';
+      await new Promise(function(resolve) { setTimeout(resolve, 0); });
+      try {
+        var apngBytes = await SimpleApngEncoder.encode(frames, aw, ah, delay, monochrome);
+        var blob = new Blob([apngBytes], { type: 'image/apng' });
+        var url = URL.createObjectURL(blob);
+        var anchor = document.createElement('a');
+        anchor.href = url;
+        var baseName = chunks[0].name || 'file';
+        anchor.download = baseName + (monochrome ? '.qr.bw.apng' : '.qr.color.apng');
+        anchor.click();
+        URL.revokeObjectURL(url);
+        apngStatus.textContent = 'Done! APNG saved (' + formatSize(blob.size) + ', ' + frames.length + ' frames)';
+      } catch (err) {
+        apngStatus.textContent = 'Error: ' + err.message;
+        console.error(err);
+      }
+      btnApng.disabled = false;
     });
 
     btnVideo.addEventListener('click', function() {
