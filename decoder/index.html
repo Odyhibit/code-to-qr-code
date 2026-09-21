@@ -272,6 +272,10 @@
         <span class="badge" id="camera-chunks-badge">0 chunks</span>
       </div>
     </div>
+    <div class="status-text hidden" id="camera-channel-ranking" style="text-align:center;">
+      Best channels: <span class="badge badge-info" id="camera-channel-code">--</span>
+      <span id="camera-channel-counts"></span>
+    </div>
     <div class="status-text hidden" id="camera-status">Starting camera...</div>
     <div class="status-text hidden" id="camera-diagnostics"></div>
     <div class="chunk-grid hidden" id="camera-chunk-grid"></div>
@@ -351,6 +355,9 @@
     var cameraPreviewBadge = document.getElementById('camera-preview-badge');
     var cameraPreviewCode = document.getElementById('camera-preview-code');
     var cameraDiagnostics = document.getElementById('camera-diagnostics');
+    var cameraChannelRanking = document.getElementById('camera-channel-ranking');
+    var cameraChannelCode = document.getElementById('camera-channel-code');
+    var cameraChannelCounts = document.getElementById('camera-channel-counts');
     var decodeModeSelect = document.getElementById('decode-mode');
 
     var dropZone = document.getElementById('drop-zone');
@@ -724,6 +731,18 @@
       return changedBits / (signature.length * 3) >= CAMERA_SIGNATURE_THRESHOLD;
     }
 
+    function updateCameraChannelRanking() {
+      var channels = [
+        { name: 'green', code: 'G', count: camChannelHits.green, order: 0 },
+        { name: 'red', code: 'R', count: camChannelHits.red, order: 1 },
+        { name: 'blue', code: 'B', count: camChannelHits.blue, order: 2 }
+      ];
+      channels.sort(function(a, b) { return b.count - a.count || a.order - b.order; });
+      cameraChannelCode.textContent = channels[0].code + channels[1].code;
+      cameraChannelCounts.textContent = 'G ' + camChannelHits.green + ' · R ' +
+        camChannelHits.red + ' · B ' + camChannelHits.blue;
+    }
+
     function activateCameraWorkerFallback(reason) {
       if (camWorkerFallback) return;
       camWorkerFallback = true;
@@ -772,9 +791,13 @@
             var results = message.results || [];
             for (var r = 0; r < results.length; r++) {
               var channel = results[r].channel || 'direct';
-              if (camChannelHits[channel] !== undefined) camChannelHits[channel]++;
-              if (camProcessQR(results[r].data || '', results[r].binaryData)) camValidQrCount++;
+              var frameInfo = camProcessQR(results[r].data || '', results[r].binaryData);
+              if (frameInfo) {
+                if (camChannelHits[channel] !== undefined) camChannelHits[channel]++;
+                camValidQrCount++;
+              }
             }
+            updateCameraChannelRanking();
             camAfterScan();
           };
           worker.onerror = function(event) {
@@ -839,6 +862,7 @@
       camLatencyTotal = 0;
       camLatencyMax = 0;
       camChannelHits = { direct: 0, green: 0, red: 0, blue: 0 };
+      updateCameraChannelRanking();
       camLastStats = { time: camLastFpsTime, submitted: 0, completed: 0, dropped: 0,
         visual: 0, valid: 0, unique: 0 };
       camTransferMode = getDecodeMode() === 'bw' ? 'mono' :
@@ -867,6 +891,7 @@
       cameraPreviewBadge.className = 'badge badge-info';
       cameraDiagnostics.textContent = '';
       cameraDiagnostics.classList.remove('hidden');
+      cameraChannelRanking.classList.remove('hidden');
 
       navigator.mediaDevices.getUserMedia({
         video: { facingMode: camFacingMode, width: { ideal: 1280 }, height: { ideal: 720 } }
