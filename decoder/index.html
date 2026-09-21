@@ -674,6 +674,14 @@
     var camLastFpsCount = 0;
     var camScanCanvas = document.createElement('canvas');
     var camScanCtx = camScanCanvas.getContext('2d', { willReadFrequently: true });
+    var camSignatureCanvas = document.createElement('canvas');
+    camSignatureCanvas.width = 24;
+    camSignatureCanvas.height = 24;
+    var camSignatureCtx = camSignatureCanvas.getContext('2d', { willReadFrequently: true });
+    var CAMERA_SIGNATURE_THRESHOLD = 0.02;
+    var CAMERA_REPEAT_AFTER_MS = 120;
+    var camLastSignature = null;
+    var camLastSignatureAt = 0;
     var camWorkers = [];
     var camWorkerBusy = [];
     var camWorkerGeneration = 0;
@@ -681,6 +689,7 @@
     var camWorkerFallback = false;
     var camCompletedCount = 0;
     var camBusyDropCount = 0;
+    var camVisualSkipCount = 0;
     var camValidQrCount = 0;
     var camUniqueChunkCount = 0;
     var camScanStarted = {};
@@ -691,6 +700,29 @@
     var camTransferMode = null;
     var camTransferStartedAt = null;
     var camTransferCompletedAt = null;
+
+    function captureCameraSignature() {
+      camSignatureCtx.drawImage(cameraVideo, 0, 0, camSignatureCanvas.width, camSignatureCanvas.height);
+      var rgba = camSignatureCtx.getImageData(0, 0,
+        camSignatureCanvas.width, camSignatureCanvas.height).data;
+      var signature = new Uint8Array(camSignatureCanvas.width * camSignatureCanvas.height);
+      for (var i = 0; i < signature.length; i++) {
+        signature[i] = (rgba[i * 4] >= 128 ? 1 : 0) |
+          (rgba[i * 4 + 1] >= 128 ? 2 : 0) |
+          (rgba[i * 4 + 2] >= 128 ? 4 : 0);
+      }
+      return signature;
+    }
+
+    function cameraSignatureChanged(signature) {
+      if (!camLastSignature || camLastSignature.length !== signature.length) return true;
+      var changedBits = 0;
+      var bitCounts = [0, 1, 1, 2, 1, 2, 2, 3];
+      for (var i = 0; i < signature.length; i++) {
+        changedBits += bitCounts[signature[i] ^ camLastSignature[i]];
+      }
+      return changedBits / (signature.length * 3) >= CAMERA_SIGNATURE_THRESHOLD;
+    }
 
     function activateCameraWorkerFallback(reason) {
       if (camWorkerFallback) return;
@@ -800,17 +832,21 @@
       camWorkerFallback = false;
       camCompletedCount = 0;
       camBusyDropCount = 0;
+      camVisualSkipCount = 0;
       camValidQrCount = 0;
       camUniqueChunkCount = 0;
       camScanStarted = {};
       camLatencyTotal = 0;
       camLatencyMax = 0;
       camChannelHits = { direct: 0, green: 0, red: 0, blue: 0 };
-      camLastStats = { time: camLastFpsTime, submitted: 0, completed: 0, dropped: 0, valid: 0, unique: 0 };
+      camLastStats = { time: camLastFpsTime, submitted: 0, completed: 0, dropped: 0,
+        visual: 0, valid: 0, unique: 0 };
       camTransferMode = getDecodeMode() === 'bw' ? 'mono' :
         (getDecodeMode() === 'color' ? 'color' : null);
       camTransferStartedAt = null;
       camTransferCompletedAt = null;
+      camLastSignature = null;
+      camLastSignatureAt = 0;
       transferMetrics.classList.add('hidden');
       transferMetrics.innerHTML = '';
       startCameraWorkers();
@@ -907,6 +943,14 @@
         camBusyDropCount++;
         return;
       }
+      var signature = captureCameraSignature();
+      var signatureNow = performance.now();
+      if (!cameraSignatureChanged(signature) && signatureNow - camLastSignatureAt < CAMERA_REPEAT_AFTER_MS) {
+        camVisualSkipCount++;
+        return;
+      }
+      camLastSignature = signature;
+      camLastSignatureAt = signatureNow;
       camScanJsQR(vw, vh, slot);
     }
 
@@ -965,6 +1009,7 @@
         var submitRate = (camFrameCount - camLastStats.submitted) / elapsed;
         var scanRate = (camCompletedCount - camLastStats.completed) / elapsed;
         var dropRate = (camBusyDropCount - camLastStats.dropped) / elapsed;
+        var visualSkipRate = (camVisualSkipCount - camLastStats.visual) / elapsed;
         var validRate = (camValidQrCount - camLastStats.valid) / elapsed;
         var uniqueRate = (camUniqueChunkCount - camLastStats.unique) / elapsed;
         var averageLatency = camCompletedCount ? camLatencyTotal / camCompletedCount : 0;
@@ -973,7 +1018,8 @@
         cameraDiagnostics.textContent = 'submit ' + submitRate.toFixed(1) + '/s · scan ' +
           scanRate.toFixed(1) + '/s · new ' + uniqueRate.toFixed(1) + '/s · raw QR ' +
           validRate.toFixed(1) + '/s · busy drops ' +
-          dropRate.toFixed(1) + '/s · latency ' + averageLatency.toFixed(0) + ' ms avg';
+          dropRate.toFixed(1) + '/s · same-frame skips ' + visualSkipRate.toFixed(1) +
+          '/s · latency ' + averageLatency.toFixed(0) + ' ms avg';
         cameraDiagnostics.title = 'Max latency ' + camLatencyMax.toFixed(0) + ' ms · channel hits: direct ' +
           camChannelHits.direct + ', green ' + camChannelHits.green + ', red ' +
           camChannelHits.red + ', blue ' + camChannelHits.blue;
@@ -982,6 +1028,7 @@
           submitted: camFrameCount,
           completed: camCompletedCount,
           dropped: camBusyDropCount,
+          visual: camVisualSkipCount,
           valid: camValidQrCount,
           unique: camUniqueChunkCount
         };
