@@ -10,7 +10,7 @@ Transfer files via animated QR codes. No network, no Bluetooth, no USB — just 
 2. **Transfer** — Point a phone camera at the screen, or export an APNG, GIF, or video and send it any way you like.
 3. **Decode** — Open the decoder on the receiving device. Scan with the camera or upload the animation/video. The file is reassembled.
 
-Each image frame carries **three independent QR codes** — one per RGB colour channel — tripling data density with no increase in image size.
+Each image frame can carry **three independent QR codes** — one per RGB colour channel — tripling data density with no increase in image size.
 
 ## Quick start
 
@@ -40,6 +40,7 @@ Open `encoder/index.html` or `decoder/index.html` directly in a browser. Camera 
 - Per-channel adaptive thresholding (Otsu) for robust red/blue recovery
 - Progressive preview as chunks arrive
 - RS recovery of missing chunks
+- End-to-end transfer time and decoded-file throughput metrics
 - ZIP archive browsing
 
 ## RGB channel encoding
